@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.5.2
+// @version      1.5.3
 // @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、PG 次数与报错查询、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -708,6 +708,43 @@
     return /temporary=true/i.test(location.search);
   }
 
+  // ------------------------------------------------------------------
+  // 快速换号（Google 多账号 /u/N/）
+  // ------------------------------------------------------------------
+
+  const ACCOUNT_SWITCH_MAX_INDEX = 5;
+
+  function accountPathPrefix() {
+    const m = W.location.pathname.match(/^(\/u\/\d+\/)/);
+    return m ? m[1] : "";
+  }
+
+  function currentAccountIndex() {
+    const m = accountPathPrefix().match(/^\/u\/(\d+)\/$/);
+    return m ? m[1] : "0";
+  }
+
+  function accountTemporaryChatURL(index) {
+    const n = Number(index) || 0;
+    const prefix = n > 0 ? "/u/" + n + "/" : "/";
+    return W.location.origin + prefix + "prompts/new_chat?temporary=true";
+  }
+
+  function switchAccount(index) {
+    const n = Number(index);
+    if (!isFinite(n) || n < 0 || n > ACCOUNT_SWITCH_MAX_INDEX) return;
+    if (String(n) === currentAccountIndex()) return;
+    const url = accountTemporaryChatURL(n);
+    log("正在切换 Google 账号 → " + (n === 0 ? "主账号" : "账号 " + n));
+    setTimeout(() => {
+      try {
+        W.location.assign(url);
+      } catch (_) {
+        log("无法自动跳转，请手动打开 " + url);
+      }
+    }, 400);
+  }
+
   function getPromptTextarea() {
     const items = Array.from(document.querySelectorAll("ms-prompt-box textarea")).filter((el) => {
       try {
@@ -1071,13 +1108,13 @@
     return m || "unknown";
   }
 
-  function bumpUsage(model, usage) {
+  function bumpUsage(model, usage, mode) {
     const u = ensureUsageDay();
     const key = trackModelKey(model);
     const row =
       u.counts[key] && typeof u.counts[key] === "object" ? u.counts[key] : { n: 0, tok: 0 };
-    row.n = (Number(row.n) || 0) + 1;
-    row.tok = (Number(row.tok) || 0) + (usage && usage.total ? Number(usage.total) || 0 : 0);
+    if (mode === "count") row.n = (Number(row.n) || 0) + 1;
+    else row.tok = (Number(row.tok) || 0) + (usage && usage.total ? Number(usage.total) || 0 : 0);
     u.counts[key] = row;
     persistUsage();
     renderQuota();
@@ -1352,6 +1389,8 @@
     }, 300000);
 
     let raw = "";
+    // 真正发往上游前计数：即使失败也占用额度，避免次数显示偏少
+    bumpUsage(task.model, null, "count");
     try {
       const fetchFn = originalFetch || W.fetch;
       const resp = await fetchFn(GENERATE_URL, {
@@ -1414,7 +1453,7 @@
       const ms = Date.now() - startedAt;
       bumpStats(true);
       bumpTokens(usage);
-      if (!usedReplay) bumpUsage(task.model, usage);
+      if (!usedReplay) bumpUsage(task.model, usage, "tokens");
       pushHistory({
         ts: Date.now(),
         model: task.model || "",
@@ -1884,7 +1923,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     const quotaList = h("div", { class: "quotaList", id: "quotaList" });
     const planBox = h("div", { class: "planBox", id: "planBox" }, [
       h("div", { class: "planBtns" }, planBtnEls),
-      h("div", { class: "planNote", text: "按本页成功请求统计 · 北京时间每天 16:00 重置 · 次数或 Token 任一用完即止" }),
+      h("div", { class: "planNote", text: "按实际发往上游的请求统计（含失败） · 北京时间每天 16:00 重置 · 次数或 Token 任一用完即止" }),
       quotaList,
     ]);
 
@@ -1896,6 +1935,25 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     errSearch.addEventListener("input", renderErrors);
     const errList = h("div", { class: "errList", id: "errList" });
     const errBox = h("div", { class: "errBox", id: "errBox" }, [errSearch, errList]);
+
+    const acctButtons = [];
+    for (let i = 0; i <= ACCOUNT_SWITCH_MAX_INDEX; i++) {
+      const btn = h("button", {
+        class: "btn",
+        type: "button",
+        text: i === 0 ? "主账号" : "账号 " + i,
+      });
+      btn.dataset.index = String(i);
+      btn.addEventListener("click", () => switchAccount(i));
+      acctButtons.push(btn);
+    }
+    const acctBox = h("div", { class: "planBox", id: "acctBox" }, [
+      h("div", { class: "planBtns" }, acctButtons),
+      h("div", {
+        class: "planNote",
+        text: "切换后跳到该账号的临时会话页并重新引导；浏览器需要先登录多个 Google 账号。",
+      }),
+    ]);
 
     const keepaliveBtn = h("button", {
       class: "btn",
@@ -1939,11 +1997,19 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       text: "🔎 报错",
       title: "查询常见状态码的原因和解决办法",
     });
+    const acctBtn = h("button", {
+      class: "btn",
+      id: "acctBtn",
+      type: "button",
+      text: "🔄 换号",
+      title: "切换 Google 多账号（/u/N/）",
+    });
     const footerRow = h("div", { class: "footerRow" }, [
       autoBootBtn,
       shieldBtn,
       planBtn,
       errBtn,
+      acctBtn,
       keepaliveBtn,
       logBtn,
       copyBtn,
@@ -1964,6 +2030,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       cacheWrap,
       planBox,
       errBox,
+      acctBox,
       historyBtn,
       historyBox,
       footerRow,
@@ -2017,6 +2084,9 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       errBox,
       errSearch,
       errList,
+      acctBtn,
+      acctBox,
+      acctButtons,
       autoBoot: autoBootBtn,
       shield: shieldBtn,
       okCount,
@@ -2155,6 +2225,10 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     ui.errBtn.addEventListener("click", () => {
       ui.errBox.classList.toggle("show");
       renderErrors();
+    });
+    ui.acctBtn.addEventListener("click", () => {
+      ui.acctBox.classList.toggle("show");
+      renderStatus();
     });
     ui.shield.addEventListener("click", async () => {
       state.shield.enabled = !state.shield.enabled;
@@ -2413,6 +2487,17 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
         (on ? "已开启（" + (state.shield.mode === "deep" ? "深度" : "标准") + "）" : "已关闭") +
         "；防截断：" +
         (state.antiTruncate ? "开" : "关");
+    }
+    if (ui.acctBtn) {
+      const cur = currentAccountIndex();
+      ui.acctBtn.textContent = "🔄 换号" + (cur !== "0" ? " " + cur : "");
+      if (ui.acctButtons) {
+        for (const btn of ui.acctButtons) {
+          const isCur = btn.dataset.index === cur;
+          btn.className = "btn" + (isCur ? " primary" : "");
+          btn.disabled = isCur;
+        }
+      }
     }
     if (state.lastError && !state.connected) ui.conn.title = state.lastError;
     ui.dot.title = state.lastError || (state.connected ? "已连接本地服务" : "未连接本地服务");
