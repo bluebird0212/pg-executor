@@ -4,6 +4,8 @@
 // @version      1.0.0
 // @description  在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地 PG Bridge 服务。支持缓存回放。
 // @author       bluebird0212
+// @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
+// @downloadURL  https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
 // @match        https://aistudio.google.com/*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
