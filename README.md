@@ -183,6 +183,32 @@ NextChat / Cherry Studio 等：
 
 > Android Chrome 本身不支持扩展，所以不能直接用 Chrome 装油猴脚本。
 
+### 方案 C：用一台旧手机当服务器（推荐给有备用机的）
+
+旧手机只跑服务，不需要登录 Google，也不用装油猴；主力手机/电脑继续当 AI Studio 执行器。
+
+1. 旧手机安装 **Termux**（建议从 F-Droid 装最新版）。
+2. 在 Termux 里执行一条命令：
+
+   ```bash
+   pkg install -y curl && curl -fsSL https://raw.githubusercontent.com/bluebird0212/pg-executor/main/termux.sh | bash
+   ```
+
+   也可以先用浏览器打开 <https://github.com/bluebird0212/pg-executor/blob/main/termux.sh>，复制内容保存为 `termux.sh` 后执行 `bash termux.sh`。
+
+3. 首次运行会自动安装 Ubuntu（proot）和 Python 依赖，需要几百 MB 空间，耐心等它跑完。
+4. 看到 `http://0.0.0.0:8090` 后，在旧手机的 Wi-Fi 设置里查看它的局域网 IP。
+5. 主力设备的 Bluebird PG 面板地址填：
+
+   ```
+   http://旧手机局域网IP:8090
+   ```
+
+6. 旧手机建议一直插电，并在系统设置里关闭 Termux 的电池优化；脚本会自动申请 wake lock。
+7. 只在自己家的局域网使用，不要把 8090 端口映射到公网。
+
+> 这条路线不需要 exe，也不需要 Windows；代价是首次安装较慢，旧手机要保持 Termux 不被系统杀掉。
+
 ---
 
 ## 三、缓存回放
