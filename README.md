@@ -94,11 +94,11 @@ Catiecli / Playground Executor 之所以「装完脚本就能用」，是因为�
 1. 浏览器安装 **Tampermonkey** 扩展。
 2. 打开安装链接：
 
-   <https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@v1.5.0/pg_executor.user.js>
+   <https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js>
 
    Tampermonkey 会弹出安装页，点「安装」。
 
-   > 如果 jsDelivr 打不开，可以改用 raw 链接：<https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js>（内容一样）。
+   > jsDelivr 在一些网络下会被墙，所以默认用 raw 链接；如果 raw 打不开，可以试 jsDelivr：<https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js>（内容一样）。
    > 之前装过旧版 **PG Bridge Executor** 的，请在 Tampermonkey 里删除旧脚本，只保留 **Bluebird PG**。
 
 3. 登录 <https://aistudio.google.com>，建议打开：
@@ -277,8 +277,8 @@ NextChat / Cherry Studio 等：
 
 这是 Tampermonkey 的安装中转页，正常情况下会自动关闭并弹出安装/更新确认。如果一直停在这里：
 
-1. 重新打开 <https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js>，等 2~3 秒。
-2. 还不行就打开 Tampermonkey 面板 →「实用工具」→「从 URL 安装」，粘贴上面的 jsDelivr 链接。
+1. 重新打开 <https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js>，等 2~3 秒。
+2. 还不行就打开 Tampermonkey 面板 →「实用工具」→「从 URL 安装」，粘贴上面的 raw 链接。
 3. 或者 Tampermonkey →「添加新脚本」，把脚本内容整段粘贴进去，Ctrl+S 保存。
 4. 更新后刷新 AI Studio，确认面板版本是 **1.5.0**。
 
