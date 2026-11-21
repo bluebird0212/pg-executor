@@ -5,6 +5,7 @@
 - 不需要导出 Cookie，不需要签名服务，不需要无头浏览器。
 - 请求由 AI Studio 页面自己发出，脚本只负责转发。
 - 自带「缓存回放」：上游断线 / 额度用完 / 想重复上一次回复时，可以把最近一次成功响应再回放一次。
+- 面板自带 **最近请求记录、完成通知、Token 用量统计**，还能一键复制 API 主机和 API Key。
 - 电脑和 Android 手机都能用：服务跑在本机，油猴脚本跑在 AI Studio 页面。
 
 > 仅供个人学习研究，请遵守 Google 的服务条款，不要用于商业或滥用。
@@ -37,6 +38,15 @@ Catiecli / Playground Executor 之所以「装完脚本就能用」，是因为�
 - Windows：下载 `bluebird-pg.exe`，双击即可，**不需要安装 Python**。
 - 手机 / 其他系统：用 `start.sh` 或手动运行 `server.py`。
 - 面板会自动扫描 `8090 / 8080 / 8091` 等常见端口，找到服务后自动连接，不需要手填地址。
+
+### 面板能做什么
+
+- **自动发现服务**：找不到时显示启动引导和下载按钮。
+- **客户端连接**：显示 API 主机和 API Key，可分别复制或一键复制全部（协议选 Google Gemini）。
+- **最近请求**：最近 20 条记录，显示时间、模型、耗时、成功/失败、Token。
+- **Token 统计**：累计输入 / 输出 / 总 Token，以及上一次请求的用量。
+- **完成通知**：请求成功或失败时，页面顶部弹出小提示。
+- **缓存回放 / 日志 / 后台保活 / 昼夜主题**。
 
 ---
 
@@ -123,7 +133,14 @@ NextChat / Cherry Studio 等：
 ### 方案 A：手机只当执行器，服务跑在电脑上（推荐）
 
 1. 电脑按上面的步骤启动服务。
-2. 在电脑上让服务监听局域网：
+2. 让服务监听局域网（二选一）：
+
+   ```bat
+   set PG_HOST=0.0.0.0
+   bluebird-pg.exe
+   ```
+
+   或者源码版：
 
    ```bat
    set PG_HOST=0.0.0.0
@@ -131,7 +148,7 @@ NextChat / Cherry Studio 等：
    ```
 
    Windows 防火墙弹窗时选择「允许」。
-3. 手机安装支持油猴脚本的浏览器（如 **Firefox for Android**），安装 Tampermonkey 和本脚本。
+3. 手机安装支持油猴脚本的浏览器（如 **Firefox for Android**、Kiwi、Cromite），安装 Tampermonkey 和本脚本。
 4. 手机登录 AI Studio，打开临时会话页，在 Bluebird PG 面板把服务地址改成：
 
    ```
@@ -139,11 +156,7 @@ NextChat / Cherry Studio 等：
    ```
 
    例如 `http://192.168.1.10:8090`（可在电脑 `ipconfig` 里查看 IPv4 地址）。
-5. 手机客户端（或电脑客户端）的 Base URL 填：
-
-   ```
-   http://电脑局域网IP:8090/v1beta
-   ```
+5. 连接成功后，面板的「客户端连接」会自动显示手机可用的 API 主机，点「📋 主机」或「📦 全部」复制到手机客户端即可。
 
 ### 方案 B：服务和浏览器都在手机上（Termux）
 
@@ -192,14 +205,36 @@ NextChat / Cherry Studio 等：
 
 **Q：页面上完全看不到 Bluebird PG 面板？**
 
-1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.3.0**。
+1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.4.0**。
 2. 新装的脚本不会注入已经打开的标签页，**必须刷新 AI Studio 页面**。
 3. 确认当前地址是 `https://aistudio.google.com/...`，脚本只匹配这个域名。
 4. 面板固定在右下角，标题栏会显示 `✓成功 ✗失败` 次数；连接失败时面板里会出现红色错误行。
 5. 如果仍然看不到，按 `F12` 打开 Console，看有没有 `[Bluebird-PG] 脚本已加载`：
    - 没有这条日志：脚本没运行，检查 Tampermonkey 图标、是否无痕模式、是否被其他扩展禁用。
    - 有日志但没有面板：把 Console 里的红色报错截图发 Issue。
-6. 1.3.0 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+6. 1.4.0 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+
+**Q：一定要用 exe 吗？没有更简单的办法吗？**
+
+不是必须用 exe，但**必须有一个能监听端口的小服务**，因为浏览器脚本自己不能提供 API 地址。
+
+- `bluebird-pg.exe` 只是 Windows 上最省事的一键打包，不需要装 Python。
+- 有 Python 的电脑可以用 `start.bat` / `server.py`。
+- 手机可以全部跑在 Termux 里，也可以把服务放在 NAS、树莓派或 VPS 上。
+- Catiecli / Playground Executor 能「只装脚本」，是因为作者在公网架了中转服务器；Bluebird PG 默认不上传你的请求，所以服务跑在你自己这边。
+
+**Q：面板里的「API 主机 / API Key」怎么用？**
+
+- 协议选 **Google Gemini**。
+- API 主机点「📋 主机」复制，例如 `http://127.0.0.1:8090/v1beta`；手机连电脑时会是 `http://电脑IP:8090/v1beta`。
+- API Key 点「🔑 Key」复制；服务默认不校验 Key，填面板里生成的即可。
+- 懒得分开复制就点「📦 全部」，会一次复制协议、主机和 Key。
+
+**Q：Token 统计为什么有时是 0？**
+
+- 使用缓存回放时没有真实请求，所以不计 Token。
+- 某些上游响应不带 usage 字段，这一条会记为 0。
+- 统计只存在浏览器本地，不会上传。
 
 **Q：面板显示「本地连接不可用 / 未找到本地服务」？**
 
