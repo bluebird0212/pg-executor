@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         PG Bridge Executor
+// @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.2.0
-// @description  在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地 PG Bridge 服务。支持缓存回放。
+// @version      1.3.0
+// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持缓存回放和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
 // @downloadURL  https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -81,6 +81,7 @@
     server: normalizeServer(pick("pgbridge.server", "http://127.0.0.1:8090")),
     connected: false,
     connecting: false,
+    discovering: false,
     lastError: "",
     serviceReady: false,
     headersReady: false,
@@ -130,7 +131,7 @@
     state.logs.push(line);
     if (state.logs.length > 120) state.logs.shift();
     try {
-      console.log("[PG-Bridge]", message);
+      console.log("[Bluebird-PG]", message);
     } catch (_) {}
     renderLog();
   }
@@ -139,11 +140,12 @@
   // 与本地服务通信（GM_xmlhttpRequest 可绕过 https 页面的混合内容限制）
   // ------------------------------------------------------------------
 
-  function request(method, path, body, timeout = 15000) {
+  function requestTo(base, method, path, body, timeout = 15000) {
+    const target = normalizeServer(base);
     return new Promise((resolve, reject) => {
       const opts = {
         method,
-        url: state.server + path,
+        url: target + path,
         headers: { "content-type": "application/json" },
         timeout,
         onload(resp) {
@@ -156,10 +158,10 @@
           resolve({ status: resp.status, data });
         },
         onerror() {
-          reject(new Error("无法连接 " + state.server));
+          reject(new Error("无法连接 " + target));
         },
         ontimeout() {
-          reject(new Error("连接超时 " + state.server));
+          reject(new Error("连接超时 " + target));
         },
       };
       if (body !== undefined && body !== null) opts.data = JSON.stringify(body);
@@ -169,6 +171,60 @@
         reject(err);
       }
     });
+  }
+
+  function request(method, path, body, timeout = 15000) {
+    return requestTo(state.server, method, path, body, timeout);
+  }
+
+  const SERVER_CANDIDATES = [
+    "http://127.0.0.1:8090",
+    "http://localhost:8090",
+    "http://127.0.0.1:8080",
+    "http://localhost:8080",
+    "http://127.0.0.1:8091",
+    "http://localhost:8091",
+  ];
+
+  async function discoverServer() {
+    if (state.discovering) return state.connected;
+    state.discovering = true;
+    renderStatus();
+    const candidates = [];
+    const add = (value) => {
+      const base = normalizeServer(value);
+      if (base && candidates.indexOf(base) < 0) candidates.push(base);
+    };
+    add(state.server);
+    SERVER_CANDIDATES.forEach(add);
+    for (const base of candidates) {
+      try {
+        const resp = await requestTo(base, "GET", "/api/status", null, 2500);
+        if (
+          resp.status === 200 &&
+          resp.data &&
+          resp.data.ok === true &&
+          resp.data.executor &&
+          typeof resp.data.executor === "object"
+        ) {
+          if (base !== state.server) {
+            state.server = base;
+            save("pgbridge.server", base);
+            log("已自动找到本地服务: " + base);
+          }
+          state.connected = true;
+          state.lastError = "";
+          state.discovering = false;
+          renderStatus();
+          return true;
+        }
+      } catch (_) {}
+    }
+    state.discovering = false;
+    state.connected = false;
+    state.lastError = "未找到本地服务，请先双击 bluebird-pg.exe 或 start.bat 启动服务";
+    renderStatus();
+    return false;
   }
 
   function cacheSummary() {
@@ -244,6 +300,15 @@
         state.connected = false;
         state.connecting = false;
         state.lastError = "本地服务不可用：" + String((err && err.message) || err);
+        const now = Date.now();
+        if (now - (state.lastDiscoverAt || 0) > 15000) {
+          state.lastDiscoverAt = now;
+          const found = await discoverServer();
+          if (found) {
+            delay = 400;
+            continue;
+          }
+        }
         await sleep(delay);
         delay = Math.min(5000, delay + 700);
       }
@@ -839,13 +904,13 @@
   const PANEL_CSS = `
 :host{all:initial}
 *{box-sizing:border-box}
-.wrap{--bg1:#fff7fc;--bg2:#f2f9ff;--card:#ffffff;--line:#ffd6e9;--fg:#4b3a52;--muted:#9b86a3;--accent:#ff8fbf;--accent2:#8fe3d3;--ok:#2fc98d;--bad:#ff6b8b;--warn:#e6a52e;--shadow:0 18px 50px rgba(255,143,191,.28);--glow:rgba(255,143,191,.18);--input:#fffafd;
+.wrap{--bg1:#f3f7ff;--bg2:#eef4fd;--card:#ffffff;--line:#cfdcf0;--fg:#33415c;--muted:#8494ac;--accent:#7799cc;--accent2:#9fc3e8;--ok:#3aa981;--bad:#e26d7e;--warn:#d99a3d;--shadow:0 18px 50px rgba(119,153,204,.30);--glow:rgba(119,153,204,.20);--input:#f7faff;
 font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg)}
-.wrap[data-theme="dark"]{--bg1:#241b2e;--bg2:#1a1522;--card:#2d2338;--line:#4b3b5a;--fg:#f9eef8;--muted:#b3a1bd;--accent:#ff9bc9;--accent2:#8ee8d8;--ok:#5ce0ae;--bad:#ff7f9c;--warn:#ffd479;--shadow:0 18px 50px rgba(0,0,0,.6);--glow:rgba(255,155,201,.16);--input:#241c2e}
+.wrap[data-theme="dark"]{--bg1:#1d2736;--bg2:#151c27;--card:#243146;--line:#3c4d66;--fg:#eaf1fb;--muted:#a2b3c9;--accent:#7799cc;--accent2:#9fd6e8;--ok:#5fd3ae;--bad:#ff8fa0;--warn:#f2c66d;--shadow:0 18px 50px rgba(0,0,0,.62);--glow:rgba(119,153,204,.22);--input:#1b2432}
 .card{position:relative;width:min(440px,calc(100vw - 20px));background:linear-gradient(155deg,var(--bg1),var(--bg2));border:1.5px solid var(--line);border-radius:22px;overflow:hidden;box-shadow:var(--shadow)}
 .card::before{content:"";position:absolute;right:-46px;top:-64px;width:170px;height:170px;border-radius:50%;background:radial-gradient(circle,var(--glow),transparent 70%);pointer-events:none}
-.head{position:relative;display:flex;align-items:center;gap:10px;padding:12px 12px 11px 13px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,rgba(255,143,191,.13),rgba(143,227,211,.11))}
-.mascot{flex:none;width:46px;height:46px;border-radius:15px;display:grid;place-items:center;font-size:27px;background:linear-gradient(145deg,#ffe3f1,#dffaf4);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65),0 6px 16px rgba(255,143,191,.28);animation:bob 3.2s ease-in-out infinite}
+.head{position:relative;display:flex;align-items:center;gap:10px;padding:12px 12px 11px 13px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,rgba(119,153,204,.16),rgba(159,195,232,.13))}
+.mascot{flex:none;width:46px;height:46px;border-radius:15px;display:grid;place-items:center;font-size:27px;background:linear-gradient(145deg,#e3efff,#dff6f4);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65),0 6px 16px rgba(119,153,204,.30);animation:bob 3.2s ease-in-out infinite}
 @keyframes bob{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
 .brand{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
 .title{display:flex;align-items:center;gap:6px;font-size:16px;font-weight:800;letter-spacing:.2px;line-height:1.2}
@@ -870,6 +935,14 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
 .counts{margin-left:auto;font-size:11px;color:var(--muted);background:var(--input);border:1px solid var(--line);border-radius:999px;padding:3px 8px;white-space:nowrap}
 .errline{display:none;background:rgba(255,107,139,.12);border:1px solid rgba(255,107,139,.45);color:var(--bad);padding:8px 10px;border-radius:12px;font-size:11.5px;line-height:1.45;word-break:break-word}
 .errline.show{display:block}
+.setup{display:none;flex-direction:column;gap:7px;background:linear-gradient(135deg,rgba(119,153,204,.13),rgba(159,195,232,.12));border:1px dashed var(--accent);border-radius:15px;padding:11px 12px}
+.setup.show{display:flex}
+.setupTitle{font-size:12px;font-weight:750;color:var(--fg)}
+.setupStep{font-size:11.5px;color:var(--muted);line-height:1.45}
+.setupStep b{color:var(--fg)}
+.setupActions{display:flex;gap:6px;margin-top:2px}
+.setupActions .btn{flex:1;height:31px}
+.setupHint{font-size:10.5px;color:var(--muted)}
 .field{display:flex;flex-direction:column;gap:5px}
 .label{font-size:10px;color:var(--muted);font-weight:750;letter-spacing:.5px}
 .inputRow{display:flex;gap:6px}
@@ -878,7 +951,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
 .btn{height:33px;padding:0 10px;border-radius:11px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap;transition:transform .12s,border-color .12s,background .12s}
 .btn:hover{border-color:var(--accent);transform:translateY(-1px)}
 .btn:active{transform:scale(.98)}
-.btn.primary{background:linear-gradient(135deg,#ff9bc9,#ff7fb4);border-color:transparent;color:#fff;box-shadow:0 6px 16px rgba(255,127,180,.3);font-weight:700}
+.btn.primary{background:linear-gradient(135deg,#8fb0dd,#7799cc);border-color:transparent;color:#fff;box-shadow:0 6px 16px rgba(119,153,204,.35);font-weight:700}
 .btn.warn{color:var(--warn);border-color:rgba(230,165,46,.5)}
 .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
@@ -971,10 +1044,10 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       "—"
     );
     const header = h("div", { class: "head" }, [
-      h("div", { class: "mascot", title: "PG Bridge 小助手" }, "🐰"),
+      h("div", { class: "mascot", title: "Bluebird PG 小助手" }, "🐰"),
       h("div", { class: "brand" }, [
-        h("div", { class: "title" }, ["PG Bridge", h("small", { text: "v" + VERSION })]),
-        h("div", { class: "sub", text: "AI Studio 执行器 · 可爱工作中" }),
+        h("div", { class: "title" }, ["Bluebird PG", h("small", { text: "v" + VERSION })]),
+        h("div", { class: "sub", text: "AI Studio 执行器 · 蓝鸟工作中" }),
       ]),
       h("div", { class: "headActions" }, [themeBtn, collapseBtn]),
     ]);
@@ -990,6 +1063,36 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     ]);
 
     const lastError = h("div", { class: "errline", id: "lastError" });
+    const downloadBtn = h("button", {
+      class: "btn primary",
+      id: "download",
+      type: "button",
+      text: "⬇️ 下载服务",
+    });
+    const retrySetupBtn = h("button", {
+      class: "btn",
+      id: "retrySetup",
+      type: "button",
+      text: "🔄 我已启动",
+    });
+    const setupBox = h("div", { class: "setup", id: "setup" }, [
+      h("div", { class: "setupTitle" }, "👋 还差一步：启动本地服务"),
+      h("div", { class: "setupStep" }, [
+        "① 下载并双击 ",
+        h("b", { text: "bluebird-pg.exe" }),
+        "（或 start.bat）",
+      ]),
+      h("div", { class: "setupStep" }, [
+        "② 回到页面点 ",
+        h("b", { text: "我已启动" }),
+        "，面板显示“已连接”即可",
+      ]),
+      h("div", { class: "setupActions" }, [downloadBtn, retrySetupBtn]),
+      h("div", {
+        class: "setupHint",
+        text: "服务窗口不要关；首次启动 Windows 防火墙请点“允许”。",
+      }),
+    ]);
     const serverInput = h("input", {
       class: "input",
       id: "server",
@@ -1077,6 +1180,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     const body = h("div", { class: "body", id: "body" }, [
       statusRow,
       lastError,
+      setupBox,
       serverField,
       actions,
       statsRow,
@@ -1100,6 +1204,9 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       conn,
       waa,
       lastError,
+      setup: setupBox,
+      download: downloadBtn,
+      retrySetup: retrySetupBtn,
       server: serverInput,
       save: saveBtn,
       reconnect: reconnectBtn,
@@ -1133,6 +1240,24 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       state.connected = false;
       log("正在重新连接…");
       renderStatus();
+      discoverServer().catch(() => {});
+    });
+    ui.download.addEventListener("click", () => {
+      try {
+        window.open("https://github.com/bluebird0212/pg-executor/releases/latest", "_blank");
+      } catch (_) {}
+    });
+    ui.retrySetup.addEventListener("click", async () => {
+      log("正在寻找本地服务…");
+      const found = await discoverServer();
+      if (found) {
+        state.connected = true;
+        state.lastError = "";
+        log("已连接 " + state.server);
+      } else {
+        log("仍然没有找到，确认服务窗口是否还在运行");
+      }
+      renderStatus();
     });
     ui.bootstrap.addEventListener("click", () => {
       log("开始手动引导…");
@@ -1165,8 +1290,16 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       log("主题已切换：" + next);
     });
     ui.copylog.addEventListener("click", () => {
-      const text = state.logs.join("\n");
-      const done = () => log("日志已复制");
+      const text = [
+        "Bluebird PG v" + VERSION,
+        "页面: " + location.href,
+        "服务: " + state.server + " (" + (state.connected ? "已连接" : "未连接") + ")",
+        "签名: " + (waaReady() ? "就绪" : "未就绪"),
+        "UA: " + navigator.userAgent,
+        "--- 日志 ---",
+        state.logs.join("\n"),
+      ].join("\n");
+      const done = () => log("诊断信息和日志已复制");
       try {
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(text).then(done).catch(() => {});
@@ -1206,7 +1339,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       "position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:320px;" +
       "background:#7a1f1f;color:#fff;padding:10px 14px;border-radius:10px;" +
       "font:13px/1.5 system-ui,-apple-system,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4)";
-    el.textContent = "PG Bridge 已加载，但面板渲染失败：" + String((err && err.message) || err);
+    el.textContent = "Bluebird PG 已加载，但面板渲染失败：" + String((err && err.message) || err);
     (document.documentElement || document.body).appendChild(el);
   }
 
@@ -1230,8 +1363,22 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     const ui = state.ui;
     if (!ui || !ui.dot) return;
     ui.dot.className =
-      "dot " + (state.connected ? (waaReady() ? "ok" : "warn") : state.connecting ? "warn" : "err");
-    ui.conn.textContent = state.connected ? "已连接" : state.connecting ? "连接中…" : "未连接";
+      "dot " +
+      (state.connected
+        ? waaReady()
+          ? "ok"
+          : "warn"
+        : state.connecting || state.discovering
+          ? "warn"
+          : "err");
+    ui.conn.textContent = state.connected
+      ? "已连接"
+      : state.discovering
+        ? "正在寻找本地服务…"
+        : state.connecting
+          ? "连接中…"
+          : "未连接";
+    if (ui.setup) ui.setup.classList.toggle("show", !state.connected);
     ui.waa.textContent = waaReady() ? "签名已就绪" : "签名未就绪";
     ui.waa.style.color = waaReady() ? "var(--ok)" : "var(--muted)";
     ui.cacheInfo.textContent =
@@ -1286,6 +1433,9 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
   } catch (_) {}
   startHookScanner();
   pollLoop();
+  setTimeout(() => {
+    if (!state.connected) discoverServer().catch(() => {});
+  }, 1200);
   setInterval(renderStatus, 1000);
   // AI Studio 是 SPA，切换页面时可能重建 DOM：定时把面板重新挂回去
   setInterval(() => {

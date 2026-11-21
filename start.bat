@@ -1,7 +1,7 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title PG Bridge
+title Bluebird PG
 
 where python >nul 2>nul
 if errorlevel 1 (
@@ -26,11 +26,12 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo.
-echo PG Bridge 启动中...
+echo Bluebird PG 启动中...
 echo 控制台地址: http://127.0.0.1:8090
 echo 客户端地址: http://127.0.0.1:8090/v1beta
 echo 关闭这个窗口即可停止服务。
 echo.
+start "" http://127.0.0.1:8090
 ".venv\Scripts\python.exe" server.py
 pause
 exit /b 0

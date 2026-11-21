@@ -1,4 +1,4 @@
-"""PG Bridge —— 让浏览器里的 AI Studio 变成标准 Gemini API。
+"""Bluebird PG —— 让浏览器里的 AI Studio 变成标准 Gemini API。
 
 本服务只做三件事：
 1. 把第三方客户端发来的 Gemini 请求编码成 AI Studio 的 wire 格式；
@@ -13,10 +13,26 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
+
+# 打包成 exe 后，把 aistudio-api 的配置/数据目录放到用户目录，避免写入只读的临时解包目录
+if getattr(sys, "frozen", False):
+    _base_dir = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "pg-bridge"
+    _data_dir = _base_dir / "data"
+    _config_file = _base_dir / "config.yaml"
+    try:
+        _data_dir.mkdir(parents=True, exist_ok=True)
+        if not _config_file.exists():
+            _config_file.write_text("{}\n", encoding="utf-8")
+        os.environ.setdefault("AISTUDIO_DATA_DIR", str(_data_dir))
+        os.environ.setdefault("AISTUDIO_CONFIG_FILE", str(_config_file))
+    except OSError:
+        pass
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -128,7 +144,7 @@ class ExecutorHub:
 
 hub = ExecutorHub()
 
-app = FastAPI(title="PG Bridge", docs_url=None, redoc_url=None)
+app = FastAPI(title="Bluebird PG", docs_url=None, redoc_url=None)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -274,7 +290,7 @@ def _model_list() -> list[dict[str, Any]]:
             {
                 "name": f"models/{mid}",
                 "displayName": display,
-                "description": "Served through PG Bridge browser executor",
+                "description": "Served through Bluebird PG browser executor",
                 "supportedGenerationMethods": [
                     "generateContent",
                     "streamGenerateContent",
@@ -676,33 +692,33 @@ PANEL_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PG Bridge 控制台</title>
+<title>Bluebird PG 控制台</title>
 <style>
 :root{color-scheme:dark}
 body{margin:0;font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
-background:#0f1217;color:#e7eaf0;padding:24px;display:flex;justify-content:center}
+background:linear-gradient(160deg,#0f1622,#121b2a);color:#e7eefb;padding:24px;display:flex;justify-content:center}
 main{width:min(760px,100%)}
-h1{font-size:20px;margin:0 0 4px}
-p.sub{color:#7b8494;margin:0 0 20px;font-size:13px}
-.card{background:#161a21;border:1px solid #252b36;border-radius:12px;padding:16px 18px;margin-bottom:14px}
+h1{font-size:20px;margin:0 0 4px;color:#eaf2ff}
+p.sub{color:#8b9bb0;margin:0 0 20px;font-size:13px}
+.card{background:#17202e;border:1px solid #2a3748;border-radius:14px;padding:16px 18px;margin-bottom:14px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
 .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.dot{width:9px;height:9px;border-radius:50%;background:#7b8494}
-.dot.ok{background:#3ddc97;box-shadow:0 0 0 4px rgba(61,220,151,.15)}
-.dot.err{background:#ff6b6b}
-code{background:#1d222b;padding:2px 6px;border-radius:5px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px}
+.dot{width:9px;height:9px;border-radius:50%;background:#8b9bb0}
+.dot.ok{background:#5fd3ae;box-shadow:0 0 0 4px rgba(95,211,174,.15)}
+.dot.err{background:#ff8fa0}
+code{background:#202b3b;padding:2px 6px;border-radius:5px;font-family:ui-monospace,Consolas,monospace;font-size:12.5px;color:#bcd2f2}
 table{width:100%;border-collapse:collapse}
-td{padding:6px 0;border-bottom:1px solid #222836;font-size:13px}
-td:first-child{color:#7b8494;width:140px}
-a{color:#6aa9ff}
+td{padding:6px 0;border-bottom:1px solid #263243;font-size:13px}
+td:first-child{color:#8b9bb0;width:140px}
+a{color:#7799cc}
 .kv{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
 </style>
 </head>
 <body><main>
-<h1>PG Bridge</h1>
+<h1>Bluebird PG</h1>
 <p class="sub">浏览器 AI Studio → 标准 Gemini API。保持 AI Studio 标签页打开即可。</p>
 <div class="card">
   <div class="row"><span class="dot" id="dot"></span><b id="state">读取中…</b>
-  <span id="meta" style="color:#7b8494;font-size:12px"></span></div>
+  <span id="meta" style="color:#8b9bb0;font-size:12px"></span></div>
 </div>
 <div class="card">
   <div class="kv"><b>给客户端填写的地址</b></div>
@@ -714,7 +730,7 @@ a{color:#6aa9ff}
   </table>
 </div>
 <div class="card">
-  <div class="kv"><b>浏览器执行器</b><span id="cache" style="color:#7b8494;font-size:12px"></span></div>
+  <div class="kv"><b>浏览器执行器</b><span id="cache" style="color:#8b9bb0;font-size:12px"></span></div>
   <table>
     <tr><td>连接状态</td><td id="exec"></td></tr>
     <tr><td>最近心跳</td><td id="seen"></td></tr>
@@ -755,8 +771,23 @@ async def index() -> HTMLResponse:
 
 
 def main() -> None:
-    print(f"PG Bridge 正在启动: http://{HOST}:{PORT}")
+    if os.name == "nt":
+        try:
+            os.system("chcp 65001 >nul")
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    print("=" * 52)
+    print(f"Bluebird PG 正在启动: http://{HOST}:{PORT}")
     print(f"客户端 Base URL: http://127.0.0.1:{PORT}/v1beta")
+    print("请不要关闭这个窗口；关闭窗口即停止服务。")
+    print("=" * 52)
+    if getattr(sys, "frozen", False) and os.getenv("PG_NO_BROWSER", "") != "1":
+        import threading
+        import webbrowser
+
+        threading.Timer(1.5, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}/")).start()
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
 
 

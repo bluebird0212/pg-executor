@@ -1,4 +1,4 @@
-# PG Bridge
+# Bluebird PG
 
 把浏览器里的 **Google AI Studio** 变成一个标准的 **Gemini API**，给 SillyTavern / NextChat / Cherry Studio 等客户端使用。
 
@@ -17,7 +17,7 @@
 客户端 (SillyTavern 等)
         │  Gemini API (http://127.0.0.1:8090/v1beta)
         ▼
-   pg-bridge 本地服务
+   Bluebird PG 本地服务
         │  长轮询下发任务（不需要 WebSocket，手机也能用）
         ▼
    AI Studio 页面里的油猴脚本
@@ -28,17 +28,36 @@
 
 本地服务负责把 Gemini 请求编码成 AI Studio 的 wire 格式，并把浏览器抓回来的原始响应解析成标准 Gemini JSON / SSE。
 
+### 为什么还要启动一个小服务？
+
+Catiecli / Playground Executor 之所以「装完脚本就能用」，是因为它们连接的是作者在公网架设的中转服务器。
+
+本项目默认**不把请求发给第三方**：油猴脚本连接的是你自己的电脑。浏览器脚本本身无法监听端口，所以需要一个很小的本地服务来转发。
+
+- Windows：下载 `bluebird-pg.exe`，双击即可，**不需要安装 Python**。
+- 手机 / 其他系统：用 `start.sh` 或手动运行 `server.py`。
+- 面板会自动扫描 `8090 / 8080 / 8091` 等常见端口，找到服务后自动连接，不需要手填地址。
+
 ---
 
 ## 一、电脑上使用（Windows）
 
-### 1. 安装 Python
+### 方案 A：一键版（推荐，无需 Python）
+
+1. 打开 [Releases](https://github.com/bluebird0212/pg-executor/releases/latest)，下载 `bluebird-pg.exe`。
+2. 双击运行。如果 Windows SmartScreen 拦截，点「更多信息」→「仍要运行」。
+3. 看到黑色窗口显示「Bluebird PG 正在启动」即可，**这个窗口不要关**。
+4. 浏览器装好油猴脚本并刷新 AI Studio，面板会自动找到 `http://127.0.0.1:8090`。
+
+### 方案 B：Python 源码版
+
+#### 1. 安装 Python
 
 安装 **Python 3.11 或更高版本**：<https://www.python.org/downloads/>
 
 安装时务必勾选 **Add Python to PATH**。
 
-### 2. 下载并启动服务
+#### 2. 下载并启动服务
 
 下载本仓库（Code → Download ZIP）并解压，双击 **`start.bat`**。
 
@@ -53,7 +72,7 @@
 > .venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 > ```
 
-### 3. 安装油猴脚本
+#### 3. 安装油猴脚本
 
 1. 浏览器安装 **Tampermonkey** 扩展。
 2. 打开安装链接：
@@ -66,10 +85,11 @@
 
    <https://aistudio.google.com/prompts/new_chat?temporary=true>
 
-4. 页面右下角会出现 **PG Bridge** 面板。确认「本地服务」是 `http://127.0.0.1:8090`，点「🔗 重新连接」。
+4. 页面右下角会出现 **Bluebird PG** 面板。服务没启动时，面板会显示「还差一步：启动本地服务」的引导；启动后点「🔄 我已启动」即可。
+   面板会自动扫描 `8090 / 8080 / 8091` 等端口，找到服务后自动连接。
    面板支持 **自动 / 日间 / 夜间** 三种主题，点标题栏右侧的 ☀️/🌙 按钮切换。
 
-### 4. 客户端设置
+#### 4. 客户端设置
 
 以 SillyTavern 为例：
 
@@ -86,7 +106,7 @@ NextChat / Cherry Studio 等：
 - API Base URL：`http://127.0.0.1:8090/v1beta`
 - API Key：任意非空字符。
 
-### 5. 第一次请求
+#### 5. 第一次请求
 
 第一次请求时脚本会自动打开临时会话页并触发一次页面发送来捕获签名环境：
 
@@ -110,7 +130,7 @@ NextChat / Cherry Studio 等：
 
    Windows 防火墙弹窗时选择「允许」。
 3. 手机安装支持油猴脚本的浏览器（如 **Firefox for Android**），安装 Tampermonkey 和本脚本。
-4. 手机登录 AI Studio，打开临时会话页，在 PG Bridge 面板把服务地址改成：
+4. 手机登录 AI Studio，打开临时会话页，在 Bluebird PG 面板把服务地址改成：
 
    ```
    http://电脑局域网IP:8090
@@ -168,20 +188,28 @@ NextChat / Cherry Studio 等：
 
 ## 四、常见问题
 
-**Q：页面上完全看不到 PG Bridge 面板？**
+**Q：页面上完全看不到 Bluebird PG 面板？**
 
-1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.2.0**。
+1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.3.0**。
 2. 新装的脚本不会注入已经打开的标签页，**必须刷新 AI Studio 页面**。
 3. 确认当前地址是 `https://aistudio.google.com/...`，脚本只匹配这个域名。
 4. 面板固定在右下角，标题栏会显示 `✓成功 ✗失败` 次数；连接失败时面板里会出现红色错误行。
-5. 如果仍然看不到，按 `F12` 打开 Console，看有没有 `[PG-Bridge] 脚本已加载`：
+5. 如果仍然看不到，按 `F12` 打开 Console，看有没有 `[Bluebird-PG] 脚本已加载`：
    - 没有这条日志：脚本没运行，检查 Tampermonkey 图标、是否无痕模式、是否被其他扩展禁用。
    - 有日志但没有面板：把 Console 里的红色报错截图发 Issue。
-6. 1.2.0 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+6. 1.3.0 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+
+**Q：面板显示「本地连接不可用 / 未找到本地服务」？**
+
+1. 还没有启动本地服务：双击 `bluebird-pg.exe` 或 `start.bat`。
+2. 服务窗口被关掉了：重新双击，窗口不要关。
+3. 端口被占用：在命令行先 `set PG_PORT=8091`，再运行 `bluebird-pg.exe`；面板会自动扫描 8091。
+4. Windows 防火墙弹窗：点「允许访问」。
+5. 手机连电脑：电脑启动前先 `set PG_HOST=0.0.0.0`，手机面板地址改成 `http://电脑局域网IP:8090`。
 
 **Q：控制台显示「执行器未连接」？**
 
-- 确认 AI Studio 页面还开着，并且 PG Bridge 面板显示「已连接」。
+- 确认 AI Studio 页面还开着，并且 Bluebird PG 面板显示「已连接」。
 - 确认面板里的服务地址和 `start.bat` 启动的地址一致。
 - 手机连电脑时，确认两台设备在同一 Wi-Fi、电脑防火墙放行 8090 端口。
 

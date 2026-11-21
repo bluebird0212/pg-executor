@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 手机 Termux / Linux / macOS 启动脚本
+# 手机 Termux / Linux / macOS 启动脚本（Bluebird PG）
 set -e
 cd "$(dirname "$0")"
 
