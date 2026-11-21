@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PG Bridge Executor
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.1.0
+// @version      1.2.0
 // @description  在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地 PG Bridge 服务。支持缓存回放。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -97,7 +97,18 @@
     ui: {},
     audio: null,
     keepAlive: String(pick("pgbridge.keepalive", "0")) === "1",
+    themeMode: (function () {
+      const value = String(pick("pgbridge.theme", "auto"));
+      return ["auto", "light", "dark"].indexOf(value) >= 0 ? value : "auto";
+    })(),
   };
+
+  let themeMedia = null;
+  try {
+    themeMedia = W.matchMedia ? W.matchMedia("(prefers-color-scheme: dark)") : null;
+  } catch (_) {
+    themeMedia = null;
+  }
 
   try {
     const rawCache = pick("pgbridge.cache", "");
@@ -828,37 +839,116 @@
   const PANEL_CSS = `
 :host{all:initial}
 *{box-sizing:border-box}
-.wrap{--bg:#0f1217;--card:#161a21;--line:#252b36;--fg:#e7eaf0;--muted:#7b8494;--ok:#3ddc97;--warn:#f2b84b;--err:#ff6b6b;--accent:#6aa9ff;
-font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg)}
-.card{width:min(360px,calc(100vw - 20px));background:var(--bg);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 14px 40px rgba(0,0,0,.4)}
-.head{display:flex;align-items:center;gap:8px;padding:9px 8px 9px 13px;background:var(--card);border-bottom:1px solid var(--line)}
-.title{font-weight:650;font-size:13px}
-.ver{color:var(--muted);font-size:10.5px}
-.counts{color:var(--muted);font-size:10.5px;white-space:nowrap;margin-left:2px}
-.dot{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--muted)}
-.dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(61,220,151,.18)}
-.dot.warn{background:var(--warn);box-shadow:0 0 0 3px rgba(242,184,75,.18)}
-.dot.err{background:var(--err);box-shadow:0 0 0 3px rgba(255,107,107,.18)}
-.ib{flex:none;width:26px;height:26px;border:0;border-radius:7px;background:transparent;color:var(--muted);font-size:15px;cursor:pointer}
-.ib:hover{background:#1d222b;color:var(--fg)}
-.body{padding:10px 12px 12px;display:flex;flex-direction:column;gap:8px;max-height:min(74vh,620px);overflow:auto}
-.line{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:11.5px}
-.strong{color:var(--fg)}
-.input{flex:1;min-width:0;height:30px;padding:0 9px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:13px}
-.btn{height:28px;padding:0 10px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;cursor:pointer;white-space:nowrap}
-.btn:hover{background:#1d222b}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.warn{border-color:#5a4a22;color:var(--warn)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.hint{color:var(--muted);font-size:11px}
-.log{display:none;white-space:pre-wrap;word-break:break-word;max-height:150px;overflow:auto;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:7px 8px;font:10.5px/1.5 ui-monospace,Consolas,monospace;color:#9aa4b5}
-.log.show{display:block}
-.errline{display:none;color:var(--err);font-size:11px;line-height:1.4;word-break:break-word}
+.wrap{--bg1:#fff7fc;--bg2:#f2f9ff;--card:#ffffff;--line:#ffd6e9;--fg:#4b3a52;--muted:#9b86a3;--accent:#ff8fbf;--accent2:#8fe3d3;--ok:#2fc98d;--bad:#ff6b8b;--warn:#e6a52e;--shadow:0 18px 50px rgba(255,143,191,.28);--glow:rgba(255,143,191,.18);--input:#fffafd;
+font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg)}
+.wrap[data-theme="dark"]{--bg1:#241b2e;--bg2:#1a1522;--card:#2d2338;--line:#4b3b5a;--fg:#f9eef8;--muted:#b3a1bd;--accent:#ff9bc9;--accent2:#8ee8d8;--ok:#5ce0ae;--bad:#ff7f9c;--warn:#ffd479;--shadow:0 18px 50px rgba(0,0,0,.6);--glow:rgba(255,155,201,.16);--input:#241c2e}
+.card{position:relative;width:min(440px,calc(100vw - 20px));background:linear-gradient(155deg,var(--bg1),var(--bg2));border:1.5px solid var(--line);border-radius:22px;overflow:hidden;box-shadow:var(--shadow)}
+.card::before{content:"";position:absolute;right:-46px;top:-64px;width:170px;height:170px;border-radius:50%;background:radial-gradient(circle,var(--glow),transparent 70%);pointer-events:none}
+.head{position:relative;display:flex;align-items:center;gap:10px;padding:12px 12px 11px 13px;border-bottom:1px solid var(--line);background:linear-gradient(135deg,rgba(255,143,191,.13),rgba(143,227,211,.11))}
+.mascot{flex:none;width:46px;height:46px;border-radius:15px;display:grid;place-items:center;font-size:27px;background:linear-gradient(145deg,#ffe3f1,#dffaf4);box-shadow:inset 0 0 0 1px rgba(255,255,255,.65),0 6px 16px rgba(255,143,191,.28);animation:bob 3.2s ease-in-out infinite}
+@keyframes bob{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-3px) rotate(2deg)}}
+.brand{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.title{display:flex;align-items:center;gap:6px;font-size:16px;font-weight:800;letter-spacing:.2px;line-height:1.2}
+.title small{font-weight:700;font-size:9.5px;color:var(--muted);background:var(--input);border:1px solid var(--line);padding:1px 6px;border-radius:999px}
+.sub{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.headActions{display:flex;align-items:center;gap:6px}
+.theme{height:28px;padding:0 9px;border-radius:999px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:10.5px;cursor:pointer;white-space:nowrap;transition:border-color .15s,transform .12s}
+.theme:hover{border-color:var(--accent);transform:translateY(-1px)}
+.ib{flex:none;width:28px;height:28px;border:0;border-radius:9px;background:transparent;color:var(--muted);font-size:16px;cursor:pointer;line-height:1}
+.ib:hover{background:var(--card);color:var(--fg)}
+.body{padding:12px 14px 14px;display:flex;flex-direction:column;gap:10px;max-height:min(78vh,660px);overflow:auto}
+.body::-webkit-scrollbar{width:6px}
+.body::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px}
+.statusRow{display:flex;align-items:center;gap:9px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 11px}
+.dot{flex:none;width:10px;height:10px;border-radius:50%;background:var(--muted);transition:background .2s,box-shadow .2s}
+.dot.ok{background:var(--ok);box-shadow:0 0 0 4px rgba(47,201,141,.16)}
+.dot.warn{background:var(--warn);box-shadow:0 0 0 4px rgba(230,165,46,.16)}
+.dot.err{background:var(--bad);box-shadow:0 0 0 4px rgba(255,107,139,.16)}
+.statusText{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.statusText strong{font-size:12.5px;font-weight:750}
+.statusText span{font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.counts{margin-left:auto;font-size:11px;color:var(--muted);background:var(--input);border:1px solid var(--line);border-radius:999px;padding:3px 8px;white-space:nowrap}
+.errline{display:none;background:rgba(255,107,139,.12);border:1px solid rgba(255,107,139,.45);color:var(--bad);padding:8px 10px;border-radius:12px;font-size:11.5px;line-height:1.45;word-break:break-word}
 .errline.show{display:block}
-.cache{display:none}
-.cache.show{display:block}
+.field{display:flex;flex-direction:column;gap:5px}
+.label{font-size:10px;color:var(--muted);font-weight:750;letter-spacing:.5px}
+.inputRow{display:flex;gap:6px}
+.input{flex:1;min-width:0;height:34px;padding:0 10px;border-radius:11px;border:1px solid var(--line);background:var(--input);color:var(--fg);font:inherit;font-size:12.5px;outline:none;transition:border-color .15s,box-shadow .15s}
+.input:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--glow)}
+.btn{height:33px;padding:0 10px;border-radius:11px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:11.5px;cursor:pointer;white-space:nowrap;transition:transform .12s,border-color .12s,background .12s}
+.btn:hover{border-color:var(--accent);transform:translateY(-1px)}
+.btn:active{transform:scale(.98)}
+.btn.primary{background:linear-gradient(135deg,#ff9bc9,#ff7fb4);border-color:transparent;color:#fff;box-shadow:0 6px 16px rgba(255,127,180,.3);font-weight:700}
+.btn.warn{color:var(--warn);border-color:rgba(230,165,46,.5)}
+.btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:7px 5px 6px;text-align:center;min-width:0}
+.stat b{display:block;font-size:16px;line-height:1.25;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stat span{font-size:9.5px;color:var(--muted)}
+.stat.ok b{color:var(--ok)}
+.stat.bad b{color:var(--bad)}
+.stat.busy b{color:var(--accent)}
+.line{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:11.5px;min-width:0}
+.strong{color:var(--fg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.footerRow{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.footerRow .btn{padding:0 4px;font-size:10.5px}
+.log{display:none;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:var(--input);border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:10.5px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}
+.log.show{display:block}
+@media(max-width:480px){.card{width:calc(100vw - 16px)}.body{max-height:70vh}.theme{padding:0 7px}}
 `;
+
+  // AI Studio 启用了 Trusted Types，禁止 innerHTML，这里全部用 DOM API 建面板
+  function h(tag, props, children) {
+    const node = document.createElement(tag);
+    if (props) {
+      for (const key of Object.keys(props)) {
+        const value = props[key];
+        if (value === null || value === undefined) continue;
+        if (key === "class") node.className = String(value);
+        else if (key === "text") node.textContent = String(value);
+        else if (key === "style") node.style.cssText = String(value);
+        else if (key.slice(0, 2) === "on" && typeof value === "function") {
+          node.addEventListener(key.slice(2).toLowerCase(), value);
+        } else if (key === "dataset" && typeof value === "object") {
+          for (const dataKey of Object.keys(value)) node.dataset[dataKey] = String(value[dataKey]);
+        } else {
+          node.setAttribute(key, String(value));
+        }
+      }
+    }
+    const list = children === null || children === undefined ? [] : [].concat(children);
+    for (const child of list) {
+      if (child === null || child === undefined || child === false) continue;
+      node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+    }
+    return node;
+  }
+
+  function currentDark() {
+    if (state.themeMode === "dark") return true;
+    if (state.themeMode === "light") return false;
+    return !!(themeMedia && themeMedia.matches);
+  }
+
+  function applyTheme() {
+    const ui = state.ui;
+    if (!ui) return;
+    const dark = currentDark();
+    if (ui.wrap) ui.wrap.dataset.theme = dark ? "dark" : "light";
+    if (ui.theme) {
+      const mode = state.themeMode;
+      ui.theme.textContent =
+        mode === "auto"
+          ? dark
+            ? "🌙 自动"
+            : "☀️ 自动"
+          : mode === "dark"
+            ? "🌙 夜间"
+            : "☀️ 日间";
+      ui.theme.title = "切换主题：自动 / 日间 / 夜间";
+    }
+  }
 
   function buildPanel() {
     const host = document.createElement("div");
@@ -869,41 +959,133 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     const root = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = PANEL_CSS;
-    const wrap = document.createElement("div");
-    wrap.className = "wrap";
-    wrap.innerHTML = `
-<div class="card">
-  <div class="head">
-    <span class="title">PG Bridge</span>
-    <span class="ver">v${VERSION}</span>
-    <span class="counts" id="counts">✓0 ✗0</span>
-    <span class="dot" id="dot"></span>
-    <button class="ib" id="collapse" title="折叠">—</button>
-  </div>
-  <div class="body" id="body">
-    <div class="line"><span>本地服务</span><span class="strong" id="conn">未连接</span><span id="waa"></span></div>
-    <div class="errline" id="lastError"></div>
-    <div class="line">
-      <input class="input" id="server" spellcheck="false">
-      <button class="btn" id="save">保存</button>
-    </div>
-    <div class="grid">
-      <button class="btn primary" id="reconnect">重新连接</button>
-      <button class="btn" id="bootstrap">手动引导</button>
-      <button class="btn warn" id="replay">下次用缓存回放</button>
-      <button class="btn" id="clear">清空缓存</button>
-    </div>
-    <div class="line"><span>缓存</span><span class="strong" id="cacheInfo">无</span></div>
-    <div class="line"><span>使用</span><span class="strong" id="stats">成功 0 / 失败 0</span><span id="task"></span></div>
-    <div class="line">
-      <button class="btn" id="keepalive">后台保活</button>
-      <button class="btn" id="logbtn">日志</button>
-      <button class="btn" id="copylog">复制日志</button>
-      <button class="btn" id="openconsole">控制台</button>
-    </div>
-    <div class="log" id="log"></div>
-  </div>
-</div>`;
+    const wrap = h("div", { class: "wrap", dataset: { theme: currentDark() ? "dark" : "light" } });
+    const themeBtn = h(
+      "button",
+      { class: "theme", id: "themeBtn", type: "button", title: "切换主题：自动 / 日间 / 夜间" },
+      "🌙 自动"
+    );
+    const collapseBtn = h(
+      "button",
+      { class: "ib", id: "collapse", type: "button", title: "折叠面板" },
+      "—"
+    );
+    const header = h("div", { class: "head" }, [
+      h("div", { class: "mascot", title: "PG Bridge 小助手" }, "🐰"),
+      h("div", { class: "brand" }, [
+        h("div", { class: "title" }, ["PG Bridge", h("small", { text: "v" + VERSION })]),
+        h("div", { class: "sub", text: "AI Studio 执行器 · 可爱工作中" }),
+      ]),
+      h("div", { class: "headActions" }, [themeBtn, collapseBtn]),
+    ]);
+
+    const dot = h("span", { class: "dot", id: "dot" });
+    const conn = h("strong", { id: "conn", text: "未连接" });
+    const waa = h("span", { id: "waa", text: "签名未就绪" });
+    const counts = h("span", { class: "counts", id: "counts", text: "✓0 ✗0" });
+    const statusRow = h("div", { class: "statusRow" }, [
+      dot,
+      h("div", { class: "statusText" }, [conn, waa]),
+      counts,
+    ]);
+
+    const lastError = h("div", { class: "errline", id: "lastError" });
+    const serverInput = h("input", {
+      class: "input",
+      id: "server",
+      type: "text",
+      spellcheck: "false",
+      placeholder: "http://127.0.0.1:8090",
+    });
+    const saveBtn = h("button", { class: "btn", id: "save", type: "button", text: "保存" });
+    const serverField = h("div", { class: "field" }, [
+      h("div", { class: "label", text: "本地服务地址" }),
+      h("div", { class: "inputRow" }, [serverInput, saveBtn]),
+    ]);
+
+    const reconnectBtn = h("button", {
+      class: "btn primary",
+      id: "reconnect",
+      type: "button",
+      text: "🔗 重新连接",
+    });
+    const bootstrapBtn = h("button", {
+      class: "btn",
+      id: "bootstrap",
+      type: "button",
+      text: "✨ 手动引导",
+    });
+    const replayBtn = h("button", {
+      class: "btn warn",
+      id: "replay",
+      type: "button",
+      text: "🎀 缓存回放",
+    });
+    const clearBtn = h("button", {
+      class: "btn",
+      id: "clear",
+      type: "button",
+      text: "🧹 清空缓存",
+    });
+    const actions = h("div", { class: "grid" }, [
+      reconnectBtn,
+      bootstrapBtn,
+      replayBtn,
+      clearBtn,
+    ]);
+
+    const okCount = h("b", { id: "okCount", text: "0" });
+    const badCount = h("b", { id: "badCount", text: "0" });
+    const taskState = h("b", { id: "taskState", text: "空闲" });
+    const taskStat = h("div", { class: "stat", id: "taskStat" }, [
+      taskState,
+      h("span", { text: "状态" }),
+    ]);
+    const statsRow = h("div", { class: "stats" }, [
+      h("div", { class: "stat ok" }, [okCount, h("span", { text: "成功" })]),
+      h("div", { class: "stat bad" }, [badCount, h("span", { text: "失败" })]),
+      taskStat,
+    ]);
+
+    const cacheInfo = h("span", { class: "strong", id: "cacheInfo", text: "无" });
+    const cacheRow = h("div", { class: "line" }, [
+      h("span", { class: "label", text: "缓存" }),
+      cacheInfo,
+    ]);
+
+    const keepaliveBtn = h("button", {
+      class: "btn",
+      id: "keepalive",
+      type: "button",
+      text: "🔔 保活",
+    });
+    const logBtn = h("button", { class: "btn", id: "logbtn", type: "button", text: "📜 日志" });
+    const copyBtn = h("button", { class: "btn", id: "copylog", type: "button", text: "📋 复制" });
+    const consoleBtn = h("button", {
+      class: "btn",
+      id: "openconsole",
+      type: "button",
+      text: "🌐 后台",
+    });
+    const footerRow = h("div", { class: "footerRow" }, [
+      keepaliveBtn,
+      logBtn,
+      copyBtn,
+      consoleBtn,
+    ]);
+    const logBox = h("div", { class: "log", id: "log" });
+    const body = h("div", { class: "body", id: "body" }, [
+      statusRow,
+      lastError,
+      serverField,
+      actions,
+      statsRow,
+      cacheRow,
+      footerRow,
+      logBox,
+    ]);
+    const card = h("div", { class: "card" }, [header, body]);
+    wrap.appendChild(card);
     root.appendChild(style);
     root.appendChild(wrap);
     const rootNode = document.documentElement || document.body;
@@ -912,27 +1094,31 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     if (oldFallback) oldFallback.remove();
     state.panel = host;
     state.ui = {
-      dot: root.getElementById("dot"),
-      counts: root.getElementById("counts"),
-      conn: root.getElementById("conn"),
-      waa: root.getElementById("waa"),
-      lastError: root.getElementById("lastError"),
-      server: root.getElementById("server"),
-      save: root.getElementById("save"),
-      reconnect: root.getElementById("reconnect"),
-      bootstrap: root.getElementById("bootstrap"),
-      replay: root.getElementById("replay"),
-      clear: root.getElementById("clear"),
-      cacheInfo: root.getElementById("cacheInfo"),
-      stats: root.getElementById("stats"),
-      task: root.getElementById("task"),
-      keepalive: root.getElementById("keepalive"),
-      logbtn: root.getElementById("logbtn"),
-      copylog: root.getElementById("copylog"),
-      openconsole: root.getElementById("openconsole"),
-      log: root.getElementById("log"),
-      collapse: root.getElementById("collapse"),
-      body: root.getElementById("body"),
+      wrap,
+      dot,
+      counts,
+      conn,
+      waa,
+      lastError,
+      server: serverInput,
+      save: saveBtn,
+      reconnect: reconnectBtn,
+      bootstrap: bootstrapBtn,
+      replay: replayBtn,
+      clear: clearBtn,
+      cacheInfo,
+      okCount,
+      badCount,
+      taskState,
+      taskStat,
+      keepalive: keepaliveBtn,
+      logbtn: logBtn,
+      copylog: copyBtn,
+      openconsole: consoleBtn,
+      log: logBox,
+      collapse: collapseBtn,
+      theme: themeBtn,
+      body,
     };
     const ui = state.ui;
     ui.server.value = state.server;
@@ -970,6 +1156,14 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     });
     ui.keepalive.addEventListener("click", toggleKeepAlive);
     ui.logbtn.addEventListener("click", () => ui.log.classList.toggle("show"));
+    ui.theme.addEventListener("click", () => {
+      const order = ["auto", "light", "dark"];
+      const next = order[(order.indexOf(state.themeMode) + 1) % order.length];
+      state.themeMode = next;
+      save("pgbridge.theme", next);
+      applyTheme();
+      log("主题已切换：" + next);
+    });
     ui.copylog.addEventListener("click", () => {
       const text = state.logs.join("\n");
       const done = () => log("日志已复制");
@@ -1001,6 +1195,7 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     });
     renderStatus();
     renderLog();
+    applyTheme();
   }
 
   function buildFallback(err) {
@@ -1037,8 +1232,8 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     ui.dot.className =
       "dot " + (state.connected ? (waaReady() ? "ok" : "warn") : state.connecting ? "warn" : "err");
     ui.conn.textContent = state.connected ? "已连接" : state.connecting ? "连接中…" : "未连接";
-    ui.waa.textContent = waaReady() ? "· 签名已就绪" : "· 签名未就绪";
-    ui.waa.style.color = waaReady() ? "#3ddc97" : "#7b8494";
+    ui.waa.textContent = waaReady() ? "签名已就绪" : "签名未就绪";
+    ui.waa.style.color = waaReady() ? "var(--ok)" : "var(--muted)";
     ui.cacheInfo.textContent =
       state.cache && state.cache.raw
         ? new Date(state.cache.ts).toLocaleTimeString() +
@@ -1049,7 +1244,8 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
           " KB" +
           (state.replayArmed ? " · 待回放" : "")
         : "无";
-    ui.stats.textContent = "成功 " + state.stats.success + " / 失败 " + state.stats.fail;
+    if (ui.okCount) ui.okCount.textContent = String(state.stats.success);
+    if (ui.badCount) ui.badCount.textContent = String(state.stats.fail);
     if (ui.counts) {
       ui.counts.textContent = "✓" + state.stats.success + " ✗" + state.stats.fail;
     }
@@ -1057,9 +1253,15 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
       ui.lastError.textContent = state.lastError ? "⚠ " + state.lastError : "";
       ui.lastError.className = "errline" + (state.lastError ? " show" : "");
     }
-    ui.task.textContent = state.currentTask ? "执行中 " + String(state.currentTask.id).slice(0, 8) : "";
+    if (ui.taskState) {
+      ui.taskState.textContent = state.currentTask ? "执行中" : "空闲";
+      ui.taskState.title = state.currentTask ? String(state.currentTask.id) : "";
+    }
+    if (ui.taskStat) {
+      ui.taskStat.className = "stat" + (state.currentTask ? " busy" : "");
+    }
     ui.replay.disabled = !(state.cache && state.cache.raw);
-    ui.keepalive.textContent = state.keepAlive ? "保活已开" : "后台保活";
+    ui.keepalive.textContent = state.keepAlive ? "🔔 保活中" : "🔔 保活";
     if (state.lastError && !state.connected) ui.conn.title = state.lastError;
     ui.dot.title = state.lastError || (state.connected ? "已连接本地服务" : "未连接本地服务");
   }
@@ -1076,6 +1278,12 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
   // ------------------------------------------------------------------
 
   log("脚本已加载 v" + VERSION + "，目标页面 " + location.host);
+  try {
+    if (themeMedia) {
+      if (themeMedia.addEventListener) themeMedia.addEventListener("change", applyTheme);
+      else if (themeMedia.addListener) themeMedia.addListener(applyTheme);
+    }
+  } catch (_) {}
   startHookScanner();
   pollLoop();
   setInterval(renderStatus, 1000);
