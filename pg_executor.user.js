@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.5.1
+// @version      1.5.2
 // @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、PG 次数与报错查询、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -889,6 +889,72 @@
     return headers;
   }
 
+  function extractProof(value) {
+    if (typeof value === "string") return value;
+    if (!value) return null;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const hit = extractProof(item);
+        if (hit) return hit;
+      }
+      return null;
+    }
+    if (typeof value === "object") {
+      for (const key of ["proof", "token", "value", "result", "data", "content"]) {
+        const hit = extractProof(value[key]);
+        if (hit) return hit;
+      }
+      try {
+        if (value instanceof ArrayBuffer) return new TextDecoder().decode(value);
+        if (ArrayBuffer.isView(value)) return new TextDecoder().decode(value);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  async function settleProofValue(value) {
+    const isProofish = (x) => typeof x === "string" && x.indexOf("!") === 0;
+    let v = value;
+    for (let depth = 0; depth < 10; depth++) {
+      if (!v) break;
+      if (typeof v.then === "function") {
+        v = await v;
+        continue;
+      }
+      // 页面里的 snapshot 可能是 generator / async generator
+      if (typeof v.next === "function" && typeof v[Symbol.iterator] === "function") {
+        const yielded = [];
+        let step = v.next();
+        while (!step.done) {
+          let inner = step.value;
+          if (inner && typeof inner.then === "function") inner = await inner;
+          yielded.push(inner);
+          step = v.next(inner);
+        }
+        v = step.value;
+        if (!isProofish(v)) {
+          const hit = yielded.find(isProofish);
+          if (hit) v = hit;
+        }
+        continue;
+      }
+      break;
+    }
+    return v;
+  }
+
+  function describeProofValue(value) {
+    if (value === null || value === undefined) return String(value);
+    if (typeof value === "object") {
+      let keys = [];
+      try {
+        keys = Object.keys(value).slice(0, 8);
+      } catch (_) {}
+      return "object keys=[" + keys.join(",") + "]";
+    }
+    return typeof value + " " + String(value).slice(0, 60);
+  }
+
   async function takeProof(digest) {
     const makerSuite = W.default_MakerSuite;
     if (!makerSuite) throw new Error("页面模块未就绪（default_MakerSuite 不存在）");
@@ -903,18 +969,22 @@
         throw new Error("签名环境未就绪，请先完成引导");
       }
       try {
-        const proof = await Promise.race([
+        const raw = await Promise.race([
           Promise.resolve(makerSuite[key](service, digest)),
           timeout(round === 0 ? 8000 : 12000),
         ]);
-        if (typeof proof !== "string" || proof.indexOf("!") !== 0) {
-          throw new Error("proof 格式异常");
+        const settled = await settleProofValue(raw);
+        const proof = extractProof(settled);
+        if (typeof proof === "string" && proof.trim().indexOf("!") === 0) {
+          return proof.trim();
         }
-        return proof;
+        lastErr = new Error(
+          "proof 格式异常（返回 " + describeProofValue(settled) + "）"
+        );
       } catch (err) {
         lastErr = err;
-        await sleep(300);
       }
+      await sleep(300);
     }
     throw new Error("生成 proof 失败: " + (lastErr && lastErr.message));
   }
