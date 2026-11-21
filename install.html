@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Bluebird PG 手机安装</title>
+<style>
+  :root{--blue:#7799cc;--blue2:#9fc3e8;--bg1:#f3f7ff;--bg2:#e9f1fc;--card:#fff;--line:#cfdcf0;--fg:#33415c;--muted:#8494ac;--shadow:0 16px 44px rgba(119,153,204,.25)}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.6 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--fg);background:linear-gradient(160deg,var(--bg1),var(--bg2));min-height:100vh;padding:22px 14px 40px}
+  main{max-width:520px;margin:0 auto}
+  .hero{text-align:center;margin:8px 0 20px}
+  .logo{width:78px;height:78px;margin:0 auto 10px;border-radius:24px;display:grid;place-items:center;font-size:42px;background:linear-gradient(145deg,#e3efff,#dff6f4);box-shadow:inset 0 0 0 1px #fff,0 10px 24px rgba(119,153,204,.3);animation:bob 3.2s ease-in-out infinite}
+  @keyframes bob{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-4px) rotate(2deg)}}
+  h1{margin:0;font-size:24px;letter-spacing:.3px}
+  .sub{color:var(--muted);font-size:13px;margin:3px 0 0}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:14px;margin-bottom:12px;box-shadow:var(--shadow)}
+  .step{font-weight:800;font-size:14px;margin-bottom:9px;display:flex;gap:7px;align-items:center}
+  .step i{flex:none;width:22px;height:22px;border-radius:50%;background:var(--blue);color:#fff;font-style:normal;font-size:12px;display:grid;place-items:center}
+  .btn{display:flex;align-items:center;justify-content:center;width:100%;min-height:44px;padding:10px 12px;margin-top:7px;border:1px solid var(--line);border-radius:12px;background:#f8fbff;color:var(--fg);font:inherit;font-weight:700;text-decoration:none;cursor:pointer}
+  .btn:active{transform:scale(.99)}
+  .btn.primary{background:linear-gradient(135deg,#8fb0dd,var(--blue));border-color:transparent;color:#fff;box-shadow:0 7px 18px rgba(119,153,204,.35)}
+  .hint{color:var(--muted);font-size:12px;line-height:1.55;margin-top:7px}
+  .hint b{color:var(--fg)}
+  details{margin-top:4px}
+  summary{cursor:pointer;color:var(--blue);font-weight:700;font-size:13px}
+  code,pre{font-family:ui-monospace,Consolas,monospace;font-size:11.5px}
+  pre{white-space:pre-wrap;word-break:break-all;background:#f2f7ff;border:1px solid var(--line);border-radius:10px;padding:9px;color:#42506b}
+  .foot{text-align:center;color:var(--muted);font-size:11px;margin-top:18px;line-height:1.7}
+  .toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,16px);background:#33415c;color:#fff;padding:9px 14px;border-radius:10px;font-size:12.5px;opacity:0;transition:.2s;pointer-events:none;max-width:90vw}
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <div class="logo">🐰</div>
+    <h1>Bluebird PG</h1>
+    <p class="sub">手机安装页 · 点几下就能用</p>
+  </div>
+
+  <div class="card">
+    <div class="step"><i>1</i>安装 Tampermonkey（已装可跳过）</div>
+    <a class="btn" href="https://www.tampermonkey.net/" target="_blank" rel="noreferrer">打开 Tampermonkey 官网</a>
+    <div class="hint">Android 推荐用 <b>Firefox</b>、<b>Kiwi</b> 或 <b>Cromite</b>；Chrome 本身不支持扩展。</div>
+  </div>
+
+  <div class="card">
+    <div class="step"><i>2</i>安装 Bluebird PG 脚本</div>
+    <a class="btn primary" href="https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js" target="_blank" rel="noreferrer">安装 / 更新脚本</a>
+    <button class="btn" id="copy" type="button">复制安装链接</button>
+    <div class="hint">如果出现 “This page is used as an intermediate step…” 页面，等它自动关闭；没反应就打开 Tampermonkey → 添加新脚本，把脚本内容粘进去保存。</div>
+  </div>
+
+  <div class="card">
+    <div class="step"><i>3</i>打开 AI Studio</div>
+    <a class="btn" href="https://aistudio.google.com/prompts/new_chat?temporary=true" target="_blank" rel="noreferrer">打开临时会话页</a>
+    <div class="hint">登录 Google 后，页面右下角会出现 Bluebird PG 面板。</div>
+  </div>
+
+  <div class="card">
+    <div class="step"><i>4</i>连接本地服务（推荐用电脑跑）</div>
+    <div class="hint">电脑双击 <b>bluebird-pg.exe</b>，手机和电脑连同一个 Wi-Fi。面板地址填 <b>http://电脑局域网IP:8090</b>，再点「复制主机 / 复制 Key」填到客户端。</div>
+    <a class="btn" href="https://github.com/bluebird0212/pg-executor/releases/latest" target="_blank" rel="noreferrer">下载 Windows 服务</a>
+    <details>
+      <summary>没有电脑？完全在手机上运行（Termux）</summary>
+      <pre>pkg update -y
+pkg install python git -y
+git clone https://github.com/bluebird0212/pg-executor.git
+cd pg-executor
+bash start.sh</pre>
+      <div class="hint">Termux 方案需要下载依赖，速度取决于网络；日常更推荐电脑跑服务。</div>
+    </details>
+  </div>
+
+  <p class="foot">Bluebird PG · 仅供个人学习研究<br>不要把 8090 端口暴露到公网</p>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+  var url = 'https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js';
+  function toast(msg) {
+    var el = document.getElementById('toast');
+    el.textContent = msg;
+    el.classList.add('show');
+    setTimeout(function () { el.classList.remove('show'); }, 2200);
+  }
+  document.getElementById('copy').addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () { toast('安装链接已复制'); }, function () { toast('复制失败，请长按链接复制'); });
+    } else {
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('安装链接已复制'); } catch (e) { toast('复制失败，请长按链接复制'); }
+      ta.remove();
+    }
+  });
+</script>
+</body>
+</html>
