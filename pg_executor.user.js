@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.5.0
-// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、请求历史、Token 统计和夜间模式。
+// @version      1.5.1
+// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、PG 次数与报错查询、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
 // @downloadURL  https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -29,6 +29,73 @@
   const BOOTSTRAP_PROMPT = "hi";
   const MAX_CACHE_BYTES = 8 * 1024 * 1024;
   const MAX_TOTAL_CACHE_BYTES = 24 * 1024 * 1024;
+
+  // Playground 每日额度（次数 / Token 任一用完即止），北京时间每天 16:00 重置
+  const PG_QUOTA = {
+    free: {
+      "gemini-4-argon": null,
+      "gemini-4-carbon": null,
+      "gemini-4-neon": null,
+      "gemini-4-hydrogen": [50, 10000000],
+      "gemini-3.1-pro-preview": null,
+      "gemini-3.8-flash": [50, 5000000],
+      "gemini-3.6-flash": [50, 5000000],
+      "gemini-3-flash-preview": [50, 5000000],
+      "gemini-3.5-flash-lite": [100, 11000000],
+      "gemini-3.1-flash-lite": [100, 5000000],
+    },
+    pro: {
+      "gemini-4-argon": [50, 15000000],
+      "gemini-4-carbon": null,
+      "gemini-4-neon": [50, 15000000],
+      "gemini-4-hydrogen": [100, 25000000],
+      "gemini-3.1-pro-preview": [50, 13000000],
+      "gemini-3.8-flash": [100, 25000000],
+      "gemini-3.6-flash": [100, 25000000],
+      "gemini-3-flash-preview": [100, 11000000],
+      "gemini-3.5-flash-lite": [100, 25000000],
+      "gemini-3.1-flash-lite": [100, 11000000],
+    },
+    ultra: {
+      "gemini-4-argon": [150, 20000000],
+      "gemini-4-carbon": [150, 20000000],
+      "gemini-4-neon": [150, 20000000],
+      "gemini-4-hydrogen": [150, 35000000],
+      "gemini-3.1-pro-preview": [100, 16000000],
+      "gemini-3.8-flash": [150, 30000000],
+      "gemini-3.6-flash": [150, 30000000],
+      "gemini-3-flash-preview": [150, 15000000],
+      "gemini-3.5-flash-lite": [150, 30000000],
+      "gemini-3.1-flash-lite": [150, 15000000],
+    },
+  };
+  const PLAN_NAMES = { free: "普通账号", pro: "Pro 账号", ultra: "Ultra 账号" };
+
+  // 报错速查（整理自社区状态码图）
+  const ERROR_DB = [
+    { code: "200", title: "PROHIBITED_CONTENT", desc: "后面跟一大段英文，通常是撞甲（内容审核）。", fix: "换一套破甲更强的预设。" },
+    { code: "400", title: "Requests ending with a model turn are not supported", desc: "预设的预填充尾部有问题。", fix: "确认报错出现在正文还是插件；正文建议换适配当前模型的预设，插件问题去插件帖子询问。" },
+    { code: "400", title: "request body is not valid JSON", desc: "请求体不是合法 JSON。", fix: "检查插头里的附加参数，把内容清空。" },
+    { code: "400", title: "Budget 0 is invalid. This model only works in thinking mode", desc: "把推理强度错误地设成了 0。", fix: "预设推理强度改成低/中/高或自动；检查插头附加参数里的 thinking_budget: 0 并删掉。" },
+    { code: "400", title: "AI Studio 拒绝当前输入", desc: "输入审核拦截，重 roll 也没用。", fix: "清理发送信息里的高敏感词汇，或安装防输入审插件（会影响模型智力，谨慎使用）。" },
+    { code: "400", title: "Request contains an invalid argument", desc: "请求里包含无效参数。", fix: "先重 roll、重启 PG 页面和酒馆；仍不行就更换预设。" },
+    { code: "400", title: "User location is not supported for the API use", desc: "当前节点被判定为不支持的地区。", fix: "换一个梯子节点。" },
+    { code: "400", title: "tokens allowed 131072", desc: "预设被谷歌标记了。", fix: "更换预设，或修改预设。" },
+    { code: "401", title: "Unauthorized", desc: "请求凭证无效或已过期。", fix: "重置密钥 / 刷新 PG 页面 / 清理浏览器 cookie 与缓存。" },
+    { code: "403", title: "The caller does not have permission", desc: "账号没有该模型权限。", fix: "4a 模型需要 PG 页面左下角为 Pro 账号；完成账号年龄验证；3.0f/3.6f 可能不可用，换模型；再不行换梯子节点。" },
+    { code: "403", title: "region not supported", desc: "区域不支持。", fix: "换一个梯子节点。" },
+    { code: "403", title: "Your account must be verified", desc: "账号触发风控，需要验证。", fix: "确保手机支持谷歌框架、谷歌三件套为最新，用绑过手机号或开 2FA 的账号到 aistudio.google.com/verify-account 验证。" },
+    { code: "404", title: "聊天补全来源错误", desc: "插头的聊天补全来源设置不对。", fix: "来源应为「自定义（兼容 OpenAI）」；确认无误后刷新 playground 页面。" },
+    { code: "404", title: "method '/GenerativeService...'", desc: "上游抽风。", fix: "重 roll。" },
+    { code: "429", title: "Too Many Requests / exceeded quota", desc: "今天次数或 Token 已到上限，两者任一用完都会报 429。", fix: "北京时间每天 16:00 重置。若是「prepayment credits depleted」，可能是节点被多人共用导致风控，换地区。" },
+    { code: "499", title: "请求已取消", desc: "网络连接超时。", fix: "刷新 PG 页面；打开预设的流式传输；确保网络稳定；若约 124s 超时，调低思考强度。" },
+    { code: "502", title: "Bad Gateway", desc: "网关或浏览器侧拦截。", fix: "秒报错先检查防广告插件并给 PG 页面加白名单；打开流式传输；真流换假流；换梯子节点。" },
+    { code: "503", title: "503 + 499 请求冲突", desc: "多个执行器抢同一个任务。", fix: "只保留一个 PG 脚本启用；只打开一个 AI Studio 标签页。" },
+    { code: "503", title: "The service is currently unavailable", desc: "通常伴随 600s 超时。", fix: "重 roll / 压缩上下文 / 降低思考强度。" },
+    { code: "503", title: "This model is currently experiencing high demand", desc: "谷歌上游高负载。", fix: "重 roll 或等待一段时间。" },
+    { code: "504", title: "bootstrap_timeout / resign_no_page_send", desc: "通常前面已经出现 403。", fix: "先按 403 处理；解决后关掉浏览器再重新打开 PG 页面，单纯刷新无效。" },
+    { code: "524", title: "Socket hang up", desc: "请求超时。", fix: "打开预设的流式传输，并尝试假流式模型。" },
+  ];
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -105,6 +172,8 @@
     shield: { enabled: true, mode: "deep" },
     antiTruncate: true,
     shieldLoaded: false,
+    plan: String(pick("pgbridge.plan", "pro")).toLowerCase(),
+    usage: { day: "", counts: {} },
     stats: { success: 0, fail: 0 },
     tokens: { prompt: 0, completion: 0, total: 0, last: null },
     history: [],
@@ -175,8 +244,26 @@
     state.caches = [];
   }
   try {
-    const rawStats = pick("pgbridge.stats", "");
-    if (rawStats) state.stats = Object.assign(state.stats, JSON.parse(rawStats));
+    const rawUsage = pick("pgbridge.usage", "");
+    if (rawUsage) {
+      const parsed = JSON.parse(rawUsage);
+      if (parsed && typeof parsed === "object") {
+        state.usage = {
+          day: String(parsed.day || ""),
+          counts: parsed.counts && typeof parsed.counts === "object" ? parsed.counts : {},
+        };
+      }
+    }
+  } catch (_) {}
+  // 本次会话统计每次刷新都从 0 开始，不继承上一次页面的成功/失败数
+  state.stats = { success: 0, fail: 0 };
+  try {
+    save("pgbridge.stats", JSON.stringify(state.stats));
+  } catch (_) {}
+  // 本次会话的请求记录也随刷新清空，保留持久化的缓存和 Token 累计
+  state.history = [];
+  try {
+    save("pgbridge.history", "[]");
   } catch (_) {}
   try {
     const rawTokens = pick("pgbridge.tokens", "");
@@ -878,6 +965,134 @@
     return String(n);
   }
 
+  function fmtWan(value) {
+    const n = Number(value) || 0;
+    if (n >= 100000000) return (n / 100000000).toFixed(2) + "亿";
+    if (n >= 10000) return (n / 10000).toFixed(n >= 1000000 ? 0 : 1) + "万";
+    return String(n);
+  }
+
+  // 额度按北京时间每天 16:00 换日
+  function quotaDayKey() {
+    const bj = Date.now() + 8 * 3600 * 1000;
+    return new Date(bj - 16 * 3600 * 1000).toISOString().slice(0, 10);
+  }
+
+  function persistUsage() {
+    try {
+      save("pgbridge.usage", JSON.stringify(state.usage));
+    } catch (_) {}
+  }
+
+  function ensureUsageDay() {
+    const key = quotaDayKey();
+    if (!state.usage || state.usage.day !== key) {
+      state.usage = { day: key, counts: {} };
+      persistUsage();
+    }
+    return state.usage;
+  }
+
+  // 把 gemini-flash-latest / gemini-pro-latest 归并到套餐表里的具体模型
+  function trackModelKey(model) {
+    let m = String(model || "").replace(/^models\//, "").trim();
+    if (m === "gemini-flash-latest") m = "gemini-3.8-flash";
+    else if (m === "gemini-pro-latest") m = "gemini-3.1-pro-preview";
+    return m || "unknown";
+  }
+
+  function bumpUsage(model, usage) {
+    const u = ensureUsageDay();
+    const key = trackModelKey(model);
+    const row =
+      u.counts[key] && typeof u.counts[key] === "object" ? u.counts[key] : { n: 0, tok: 0 };
+    row.n = (Number(row.n) || 0) + 1;
+    row.tok = (Number(row.tok) || 0) + (usage && usage.total ? Number(usage.total) || 0 : 0);
+    u.counts[key] = row;
+    persistUsage();
+    renderQuota();
+  }
+
+  function renderQuota() {
+    const ui = state.ui;
+    if (!ui || !ui.quotaList) return;
+    const u = ensureUsageDay();
+    const plan = PG_QUOTA[state.plan] ? state.plan : "pro";
+    const table = PG_QUOTA[plan];
+    if (ui.planBtns) {
+      for (const btn of ui.planBtns) {
+        btn.className = "btn" + (btn.dataset.plan === plan ? " primary" : "");
+      }
+    }
+    const box = ui.quotaList;
+    box.textContent = "";
+    const names = Object.keys(table);
+    const extras = Object.keys(u.counts).filter((k) => !table[k]);
+    for (const name of names.concat(extras)) {
+      const used = u.counts[name] || { n: 0, tok: 0 };
+      const limit = Object.prototype.hasOwnProperty.call(table, name) ? table[name] : undefined;
+      let numText = "";
+      let leftText = "";
+      let leftCls = " none";
+      let tip = "";
+      if (limit) {
+        const leftN = Math.max(0, limit[0] - (Number(used.n) || 0));
+        numText = (Number(used.n) || 0) + "/" + limit[0] + " 次";
+        leftText = "剩 " + leftN + " 次";
+        leftCls = leftN === 0 ? " bad" : leftN <= 5 ? " warn" : "";
+        tip =
+          "Token 已用 " +
+          fmtWan(used.tok) +
+          " / " +
+          fmtWan(limit[1]) +
+          (leftN === 0 ? " · 次数已用完" : "");
+      } else if (limit === null) {
+        numText = "本套餐不可用";
+        leftText = "—";
+        tip = PLAN_NAMES[plan] + " 不支持该模型";
+      } else {
+        numText = (Number(used.n) || 0) + " 次";
+        leftText = "不在套餐表";
+        tip = "该模型不在当前套餐表格中，只统计使用次数";
+      }
+      box.appendChild(
+        h("div", { class: "qrow", title: tip }, [
+          h("span", { class: "qname", text: name }),
+          h("span", { class: "qnum", text: numText }),
+          h("span", { class: "qleft" + leftCls, text: leftText }),
+        ])
+      );
+    }
+  }
+
+  function renderErrors() {
+    const ui = state.ui;
+    if (!ui || !ui.errList) return;
+    const q = String((ui.errSearch && ui.errSearch.value) || "").trim().toLowerCase();
+    const items = ERROR_DB.filter((e) => {
+      if (!q) return true;
+      return (e.code + " " + e.title + " " + e.desc + " " + e.fix).toLowerCase().indexOf(q) >= 0;
+    });
+    const box = ui.errList;
+    box.textContent = "";
+    if (!items.length) {
+      box.appendChild(h("div", { class: "hempty", text: "没有匹配的报错，换个状态码或关键词试试" }));
+      return;
+    }
+    for (const e of items) {
+      box.appendChild(
+        h("div", { class: "erow" }, [
+          h("div", { class: "ehead" }, [
+            h("span", { class: "ecode", text: e.code }),
+            h("span", { class: "etitle", text: e.title }),
+          ]),
+          h("div", { class: "edesc", text: e.desc }),
+          h("div", { class: "efix", text: "👉 " + e.fix }),
+        ])
+      );
+    }
+  }
+
   function readUsage(usage) {
     if (!Array.isArray(usage) || !usage.length) return null;
     const prompt = Number(usage[0]) || 0;
@@ -1129,6 +1344,7 @@
       const ms = Date.now() - startedAt;
       bumpStats(true);
       bumpTokens(usage);
+      if (!usedReplay) bumpUsage(task.model, usage);
       pushHistory({
         ts: Date.now(),
         model: task.model || "",
@@ -1276,11 +1492,35 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
 .stat.busy b{color:var(--accent)}
 .line{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:11.5px;min-width:0}
 .strong{color:var(--fg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.footerRow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.footerRow{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
 .footerRow .btn{padding:0 4px;font-size:10.5px}
 .mini{flex:none;height:22px;padding:0 7px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:9.5px;cursor:pointer;white-space:nowrap}
 .mini:hover{border-color:var(--accent);color:var(--accent)}
 .mini.on{background:linear-gradient(135deg,#8fb0dd,#7799cc);border-color:transparent;color:#fff}
+.planBox{display:none;flex-direction:column;gap:7px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 10px}
+.planBox.show{display:flex}
+.planBtns{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.planBtns .btn{height:27px;font-size:10.5px;padding:0 4px}
+.planNote{font-size:9.5px;color:var(--muted);line-height:1.4}
+.quotaList{display:flex;flex-direction:column;gap:2px;max-height:220px;overflow:auto}
+.qrow{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--muted);min-width:0;padding:2px 0}
+.qname{flex:1;min-width:0;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,Consolas,monospace}
+.qnum{flex:none;font-variant-numeric:tabular-nums;white-space:nowrap}
+.qleft{flex:none;min-width:62px;text-align:right;font-weight:700;color:var(--ok);white-space:nowrap}
+.qleft.warn{color:var(--warn)}
+.qleft.bad{color:var(--bad)}
+.qleft.none{color:var(--muted);font-weight:400}
+.errBox{display:none;flex-direction:column;gap:7px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:9px 10px}
+.errBox.show{display:flex}
+.errSearch{width:100%;height:31px;padding:0 9px;border-radius:10px;border:1px solid var(--line);background:var(--input);color:var(--fg);font:inherit;font-size:11.5px;outline:none}
+.errSearch:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--glow)}
+.errList{display:flex;flex-direction:column;gap:7px;max-height:250px;overflow:auto}
+.erow{background:var(--input);border:1px solid var(--line);border-radius:10px;padding:7px 8px;display:flex;flex-direction:column;gap:3px}
+.ehead{display:flex;align-items:center;gap:6px;min-width:0}
+.ecode{flex:none;font:700 10px/1 ui-monospace,Consolas,monospace;color:#fff;background:#7799cc;border-radius:6px;padding:3px 6px}
+.etitle{flex:1;min-width:0;font-size:11px;font-weight:700;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.edesc{font-size:10.5px;color:var(--muted);line-height:1.45}
+.efix{font-size:10.5px;color:var(--fg);line-height:1.45}
 .log{display:none;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:var(--input);border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:10.5px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}
 .log.show{display:block}
 .apiBox{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 11px}
@@ -1561,6 +1801,32 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     ]);
     const cacheWrap = h("div", { class: "historyWrap", id: "cacheList" });
 
+    const planBtnEls = ["free", "pro", "ultra"].map((plan) => {
+      const btn = h("button", { class: "btn", type: "button", text: PLAN_NAMES[plan] });
+      btn.dataset.plan = plan;
+      btn.addEventListener("click", () => {
+        state.plan = plan;
+        save("pgbridge.plan", plan);
+        renderQuota();
+      });
+      return btn;
+    });
+    const quotaList = h("div", { class: "quotaList", id: "quotaList" });
+    const planBox = h("div", { class: "planBox", id: "planBox" }, [
+      h("div", { class: "planBtns" }, planBtnEls),
+      h("div", { class: "planNote", text: "按本页成功请求统计 · 北京时间每天 16:00 重置 · 次数或 Token 任一用完即止" }),
+      quotaList,
+    ]);
+
+    const errSearch = h("input", {
+      class: "errSearch",
+      type: "text",
+      placeholder: "输入状态码或关键词，如 429 / 403 / 504",
+    });
+    errSearch.addEventListener("input", renderErrors);
+    const errList = h("div", { class: "errList", id: "errList" });
+    const errBox = h("div", { class: "errBox", id: "errBox" }, [errSearch, errList]);
+
     const keepaliveBtn = h("button", {
       class: "btn",
       id: "keepalive",
@@ -1589,9 +1855,25 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       text: "🛡 防路由",
       title: "切换服务端防路由护盾与防截断",
     });
+    const planBtn = h("button", {
+      class: "btn",
+      id: "planBtn",
+      type: "button",
+      text: "📊 次数",
+      title: "查看今天各模型使用次数与剩余额度",
+    });
+    const errBtn = h("button", {
+      class: "btn",
+      id: "errBtn",
+      type: "button",
+      text: "🔎 报错",
+      title: "查询常见状态码的原因和解决办法",
+    });
     const footerRow = h("div", { class: "footerRow" }, [
       autoBootBtn,
       shieldBtn,
+      planBtn,
+      errBtn,
       keepaliveBtn,
       logBtn,
       copyBtn,
@@ -1610,6 +1892,8 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       tokenRow,
       cacheRow,
       cacheWrap,
+      planBox,
+      errBox,
       historyBtn,
       historyBox,
       footerRow,
@@ -1655,6 +1939,14 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       cacheInfo,
       cacheBtn,
       cacheWrap,
+      planBox,
+      planBtns: planBtnEls,
+      quotaList,
+      planBtn,
+      errBtn,
+      errBox,
+      errSearch,
+      errList,
       autoBoot: autoBootBtn,
       shield: shieldBtn,
       okCount,
@@ -1786,6 +2078,14 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       log("自动引导已" + (state.autoBootstrap ? "开启" : "关闭"));
       renderStatus();
     });
+    ui.planBtn.addEventListener("click", () => {
+      ui.planBox.classList.toggle("show");
+      renderQuota();
+    });
+    ui.errBtn.addEventListener("click", () => {
+      ui.errBox.classList.toggle("show");
+      renderErrors();
+    });
     ui.shield.addEventListener("click", async () => {
       state.shield.enabled = !state.shield.enabled;
       renderStatus();
@@ -1830,6 +2130,8 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     renderLog();
     renderHistory();
     renderCaches();
+    renderQuota();
+    renderErrors();
     applyTheme();
   }
 
@@ -1934,21 +2236,31 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     for (const item of state.history.slice(0, 10)) {
       const model = String(item.model || "").replace(/^models\//, "");
       const ms = Math.max(0, Number(item.ms) || 0);
-      box.appendChild(
-        h("div", { class: "hitem", title: item.error || "" }, [
-          h("span", {
-            class: "hdot " + (item.ok ? "ok" : "bad"),
-            text: item.ok ? "✓" : "✗",
-          }),
-          h("span", { class: "htime", text: new Date(item.ts).toLocaleTimeString() }),
-          h("span", {
-            class: "hmodel",
-            text: (item.replay ? "[回放] " : "") + (model || "未知模型"),
-          }),
-          h("span", { class: "hms", text: (ms / 1000).toFixed(1) + "s" }),
-          h("span", { class: "htok", text: item.total ? fmtNum(item.total) : "" }),
-        ])
-      );
+      const row = h("div", { class: "hitem", title: item.error || "" }, [
+        h("span", {
+          class: "hdot " + (item.ok ? "ok" : "bad"),
+          text: item.ok ? "✓" : "✗",
+        }),
+        h("span", { class: "htime", text: new Date(item.ts).toLocaleTimeString() }),
+        h("span", {
+          class: "hmodel",
+          text: (item.replay ? "[回放] " : "") + (model || "未知模型"),
+        }),
+        h("span", { class: "hms", text: (ms / 1000).toFixed(1) + "s" }),
+        h("span", { class: "htok", text: item.total ? fmtNum(item.total) : "" }),
+      ]);
+      if (!item.ok && item.error) {
+        row.style.cursor = "pointer";
+        row.title = item.error + "（点击查报错）";
+        row.addEventListener("click", () => {
+          if (!state.ui || !state.ui.errBox) return;
+          const m = /(?:^|\D)(\d{3})(?:\D|$)/.exec(String(item.error));
+          state.ui.errSearch.value = m ? m[1] : "";
+          state.ui.errBox.classList.add("show");
+          renderErrors();
+        });
+      }
+      box.appendChild(row);
     }
   }
 
