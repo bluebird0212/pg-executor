@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.3.0
-// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持缓存回放和夜间模式。
+// @version      1.4.0
+// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持缓存回放、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
 // @downloadURL  https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -74,7 +74,13 @@
     let s = String(raw || "").trim();
     if (!s) return "http://127.0.0.1:8090";
     if (!/^https?:\/\//i.test(s)) s = "http://" + s;
-    return s.replace(/\/+$/, "");
+    s = s.replace(/\/+$/, "");
+    s = s.replace(/\/v1beta$/i, "");
+    return s;
+  }
+
+  function apiBase() {
+    return normalizeServer(state.server) + "/v1beta";
   }
 
   const state = {
@@ -93,6 +99,19 @@
     replayArmed: false,
     cache: null,
     stats: { success: 0, fail: 0 },
+    tokens: { prompt: 0, completion: 0, total: 0, last: null },
+    history: [],
+    apiKey: (function () {
+      let key = String(pick("pgbridge.apikey", ""));
+      if (!/^bb-[a-z0-9]{8,}$/i.test(key)) {
+        key =
+          "bb-" +
+          Math.random().toString(36).slice(2, 10) +
+          Math.random().toString(36).slice(2, 10);
+        save("pgbridge.apikey", key);
+      }
+      return key;
+    })(),
     logs: [],
     panel: null,
     ui: {},
@@ -120,6 +139,20 @@
   try {
     const rawStats = pick("pgbridge.stats", "");
     if (rawStats) state.stats = Object.assign(state.stats, JSON.parse(rawStats));
+  } catch (_) {}
+  try {
+    const rawTokens = pick("pgbridge.tokens", "");
+    if (rawTokens) {
+      const parsed = JSON.parse(rawTokens);
+      if (parsed && typeof parsed === "object") state.tokens = Object.assign(state.tokens, parsed);
+    }
+  } catch (_) {}
+  try {
+    const rawHistory = pick("pgbridge.history", "");
+    if (rawHistory) {
+      const parsed = JSON.parse(rawHistory);
+      if (Array.isArray(parsed)) state.history = parsed.slice(0, 20);
+    }
   } catch (_) {}
 
   // ------------------------------------------------------------------
@@ -733,6 +766,130 @@
     } catch (_) {}
   }
 
+  function fmtNum(value) {
+    const n = Number(value) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1) + "k";
+    return String(n);
+  }
+
+  function readUsage(usage) {
+    if (!Array.isArray(usage) || !usage.length) return null;
+    const prompt = Number(usage[0]) || 0;
+    const visible = Number(usage[1]) || 0;
+    const total = Number(usage[2]) || 0;
+    const reasoning = Number(usage[9]) || 0;
+    const completion = visible + reasoning;
+    if (!prompt && !completion && !total) return null;
+    return {
+      prompt,
+      completion,
+      total: total || prompt + completion,
+      reasoning,
+    };
+  }
+
+  // 从上游原始 JSON / 拼接的流式 JSON 里提取最后一次 usage
+  function extractUsage(raw) {
+    if (!raw) return null;
+    let latest = null;
+    const visit = (chunk) => {
+      if (!Array.isArray(chunk)) return;
+      const usage = readUsage(chunk[2]);
+      if (usage) latest = usage;
+    };
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        visit(parsed);
+        if (latest) return latest;
+      }
+    } catch (_) {}
+    let depth = 0;
+    let start = -1;
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < raw.length; i += 1) {
+      const ch = raw[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+      if (ch === "[" || ch === "{") {
+        if (depth === 0) start = i;
+        depth += 1;
+      } else if (ch === "]" || ch === "}") {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          try {
+            visit(JSON.parse(raw.slice(start, i + 1)));
+          } catch (_) {}
+          start = -1;
+        }
+      }
+    }
+    return latest;
+  }
+
+  function bumpTokens(usage) {
+    if (!usage) return;
+    state.tokens.prompt += usage.prompt || 0;
+    state.tokens.completion += usage.completion || 0;
+    state.tokens.total += usage.total || 0;
+    state.tokens.last = usage;
+    try {
+      save("pgbridge.tokens", JSON.stringify(state.tokens));
+    } catch (_) {}
+  }
+
+  function pushHistory(entry) {
+    state.history.unshift(entry);
+    if (state.history.length > 20) state.history.length = 20;
+    try {
+      save("pgbridge.history", JSON.stringify(state.history));
+    } catch (_) {}
+    renderHistory();
+  }
+
+  function notify(message, ok) {
+    log(message);
+    const ui = state.ui;
+    if (!ui || !ui.toast) return;
+    ui.toast.textContent = message;
+    ui.toast.className = "toast show " + (ok ? "ok" : "bad");
+    if (state.toastTimer) clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => {
+      ui.toast.className = "toast " + (ok ? "ok" : "bad");
+    }, 3200);
+  }
+
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) {}
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+      document.documentElement.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function splitChunks(text, size) {
     const out = [];
     for (let i = 0; i < text.length; i += size) out.push(text.slice(i, i + size));
@@ -752,8 +909,8 @@
     } else {
       await postResult({ id: task.id, kind: "response", status: 200, rawResponse: raw });
     }
-    bumpStats(true);
     log("缓存回放完成（" + raw.length + " 字符）");
+    return null;
   }
 
   function parseUpstreamMessage(text) {
@@ -839,21 +996,60 @@
     }
 
     saveCache(task.model, task.stream, raw);
-    bumpStats(true);
+    const usage = extractUsage(raw);
     log("完成 " + task.id.slice(0, 8) + "（" + raw.length + " 字符）");
+    return usage;
   }
 
   async function handleTask(task) {
     state.currentTask = task;
     renderStatus();
     await postResult({ id: task.id, kind: "ack" });
+    const startedAt = Date.now();
+    const usedReplay = !!(state.replayArmed && state.cache && state.cache.raw);
+    if (usedReplay) log("使用缓存回放 " + String(task.id).slice(0, 8));
     try {
-      if (state.replayArmed && state.cache && state.cache.raw) {
-        log("使用缓存回放 " + String(task.id).slice(0, 8));
-        await replayTask(task);
-      } else {
-        await executeTask(task);
-      }
+      const usage = usedReplay ? await replayTask(task) : await executeTask(task);
+      const ms = Date.now() - startedAt;
+      bumpStats(true);
+      bumpTokens(usage);
+      pushHistory({
+        ts: Date.now(),
+        model: task.model || "",
+        stream: !!task.stream,
+        ok: true,
+        ms,
+        prompt: usage ? usage.prompt : 0,
+        completion: usage ? usage.completion : 0,
+        total: usage ? usage.total : 0,
+        replay: usedReplay,
+      });
+      notify(
+        (usedReplay ? "🎀 缓存回放完成" : "✅ 请求完成") +
+          " · " +
+          (task.model || "未知模型") +
+          " · " +
+          (ms / 1000).toFixed(1) +
+          "s" +
+          (usage ? " · " + fmtNum(usage.total) + " tokens" : ""),
+        true
+      );
+    } catch (err) {
+      bumpStats(false);
+      pushHistory({
+        ts: Date.now(),
+        model: task.model || "",
+        stream: !!task.stream,
+        ok: false,
+        ms: Date.now() - startedAt,
+        prompt: 0,
+        completion: 0,
+        total: 0,
+        replay: usedReplay,
+        error: String((err && err.message) || err).slice(0, 200),
+      });
+      notify("❌ 请求失败：" + String((err && err.message) || err), false);
+      throw err;
     } finally {
       state.currentTask = null;
       renderStatus();
@@ -968,6 +1164,29 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
 .footerRow .btn{padding:0 4px;font-size:10.5px}
 .log{display:none;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:var(--input);border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:10.5px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}
 .log.show{display:block}
+.apiBox{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 11px}
+.apiHead{display:flex;align-items:center;justify-content:space-between;gap:6px}
+.apiTitle{font-size:11px;font-weight:750;color:var(--fg)}
+.apiHint{font-size:9.5px;color:var(--muted)}
+.apiRow{display:flex;align-items:center;gap:6px;min-width:0}
+.apiLabel{flex:none;width:52px;font-size:10px;color:var(--muted)}
+.apiValue{flex:1;min-width:0;font:10.5px/1.4 ui-monospace,Consolas,monospace;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.apiActions{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+.apiActions .btn{height:29px;font-size:10.5px;padding:0 4px}
+.historyWrap{display:none;background:var(--input);border:1px solid var(--line);border-radius:12px;padding:7px 9px;max-height:190px;overflow:auto;flex-direction:column;gap:5px}
+.historyWrap.show{display:flex}
+.hitem{display:flex;align-items:center;gap:6px;font-size:10.5px;color:var(--muted);min-width:0}
+.hdot{flex:none;width:14px;text-align:center;font-weight:800}
+.hdot.ok{color:var(--ok)}
+.hdot.bad{color:var(--bad)}
+.htime{flex:none;font-variant-numeric:tabular-nums}
+.hmodel{flex:1;min-width:0;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hms{flex:none}
+.htok{flex:none;color:var(--accent)}
+.hempty{font-size:10.5px;color:var(--muted);text-align:center;padding:6px}
+.toast{position:fixed;left:50%;top:14px;transform:translate(-50%,-14px);z-index:2147483647;max-width:min(420px,calc(100vw - 24px));background:var(--card);color:var(--fg);border:1px solid var(--line);border-left:4px solid var(--ok);border-radius:12px;padding:9px 12px;font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 12px 30px rgba(0,0,0,.28);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;word-break:break-word}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.toast.bad{border-left-color:var(--bad)}
 @media(max-width:480px){.card{width:calc(100vw - 16px)}.body{max-height:70vh}.theme{padding:0 7px}}
 `;
 
@@ -1106,6 +1325,42 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       h("div", { class: "inputRow" }, [serverInput, saveBtn]),
     ]);
 
+    const apiHostText = h("span", { class: "apiValue", id: "apiHost", text: "—" });
+    const apiKeyText = h("span", { class: "apiValue", id: "apiKey", text: state.apiKey });
+    const copyHostBtn = h("button", {
+      class: "btn",
+      id: "copyHost",
+      type: "button",
+      text: "📋 主机",
+    });
+    const copyKeyBtn = h("button", {
+      class: "btn",
+      id: "copyKey",
+      type: "button",
+      text: "🔑 Key",
+    });
+    const copyAllBtn = h("button", {
+      class: "btn primary",
+      id: "copyAll",
+      type: "button",
+      text: "📦 全部",
+    });
+    const apiBox = h("div", { class: "apiBox" }, [
+      h("div", { class: "apiHead" }, [
+        h("span", { class: "apiTitle", text: "客户端连接" }),
+        h("span", { class: "apiHint", text: "协议选 Google Gemini" }),
+      ]),
+      h("div", { class: "apiRow" }, [
+        h("span", { class: "apiLabel", text: "API 主机" }),
+        apiHostText,
+      ]),
+      h("div", { class: "apiRow" }, [
+        h("span", { class: "apiLabel", text: "API Key" }),
+        apiKeyText,
+      ]),
+      h("div", { class: "apiActions" }, [copyHostBtn, copyKeyBtn, copyAllBtn]),
+    ]);
+
     const reconnectBtn = h("button", {
       class: "btn primary",
       id: "reconnect",
@@ -1150,6 +1405,22 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       taskStat,
     ]);
 
+    const tokenTotal = h("b", { class: "strong", id: "tokenTotal", text: "0" });
+    const tokenDetail = h("span", { id: "tokenDetail", text: "上次 —" });
+    const tokenRow = h("div", { class: "line" }, [
+      h("span", { class: "label", text: "Token" }),
+      tokenTotal,
+      tokenDetail,
+    ]);
+
+    const historyBtn = h("button", {
+      class: "btn",
+      id: "historyBtn",
+      type: "button",
+      text: "🕘 最近请求",
+    });
+    const historyBox = h("div", { class: "historyWrap", id: "history" });
+
     const cacheInfo = h("span", { class: "strong", id: "cacheInfo", text: "无" });
     const cacheRow = h("div", { class: "line" }, [
       h("span", { class: "label", text: "缓存" }),
@@ -1177,19 +1448,25 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       consoleBtn,
     ]);
     const logBox = h("div", { class: "log", id: "log" });
+    const toast = h("div", { class: "toast", id: "toast" });
     const body = h("div", { class: "body", id: "body" }, [
       statusRow,
       lastError,
       setupBox,
       serverField,
+      apiBox,
       actions,
       statsRow,
+      tokenRow,
       cacheRow,
+      historyBtn,
+      historyBox,
       footerRow,
       logBox,
     ]);
     const card = h("div", { class: "card" }, [header, body]);
     wrap.appendChild(card);
+    wrap.appendChild(toast);
     root.appendChild(style);
     root.appendChild(wrap);
     const rootNode = document.documentElement || document.body;
@@ -1209,6 +1486,16 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       retrySetup: retrySetupBtn,
       server: serverInput,
       save: saveBtn,
+      apiHost: apiHostText,
+      apiKey: apiKeyText,
+      copyHost: copyHostBtn,
+      copyKey: copyKeyBtn,
+      copyAll: copyAllBtn,
+      tokenTotal,
+      tokenDetail,
+      historyBtn,
+      history: historyBox,
+      toast,
       reconnect: reconnectBtn,
       bootstrap: bootstrapBtn,
       replay: replayBtn,
@@ -1259,6 +1546,27 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       }
       renderStatus();
     });
+    ui.copyHost.addEventListener("click", async () => {
+      const ok = await copyText(apiBase());
+      notify(ok ? "API 主机已复制：" + apiBase() : "复制失败，请手动选中复制", ok);
+    });
+    ui.copyKey.addEventListener("click", async () => {
+      const ok = await copyText(state.apiKey);
+      notify(ok ? "API Key 已复制" : "复制失败，请手动选中复制", ok);
+    });
+    ui.copyAll.addEventListener("click", async () => {
+      const text = [
+        "协议: Google Gemini",
+        "API 主机: " + apiBase(),
+        "API Key: " + state.apiKey,
+      ].join("\n");
+      const ok = await copyText(text);
+      notify(ok ? "客户端连接信息已复制" : "复制失败，请手动复制", ok);
+    });
+    ui.historyBtn.addEventListener("click", () => {
+      ui.history.classList.toggle("show");
+      renderHistory();
+    });
     ui.bootstrap.addEventListener("click", () => {
       log("开始手动引导…");
       bootstrap().catch((err) => log("引导失败: " + err.message));
@@ -1299,22 +1607,8 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
         "--- 日志 ---",
         state.logs.join("\n"),
       ].join("\n");
-      const done = () => log("诊断信息和日志已复制");
-      try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text).then(done).catch(() => {});
-        } else {
-          const ta = document.createElement("textarea");
-          ta.value = text;
-          document.documentElement.appendChild(ta);
-          ta.select();
-          document.execCommand("copy");
-          ta.remove();
-          done();
-        }
-      } catch (err) {
-        log("复制失败: " + (err && err.message));
-      }
+      const done = (ok) => notify(ok ? "诊断信息和日志已复制" : "复制失败，请手动复制日志", ok);
+      copyText(text).then(done).catch(() => done(false));
     });
     ui.openconsole.addEventListener("click", () => {
       try {
@@ -1328,6 +1622,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     });
     renderStatus();
     renderLog();
+    renderHistory();
     applyTheme();
   }
 
@@ -1356,6 +1651,36 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       buildPanel();
     } catch (err) {
       buildFallback(err);
+    }
+  }
+
+  function renderHistory() {
+    const ui = state.ui;
+    if (!ui || !ui.history) return;
+    const box = ui.history;
+    box.textContent = "";
+    if (!state.history.length) {
+      box.appendChild(h("div", { class: "hempty", text: "还没有请求记录" }));
+      return;
+    }
+    for (const item of state.history.slice(0, 10)) {
+      const model = String(item.model || "").replace(/^models\//, "");
+      const ms = Math.max(0, Number(item.ms) || 0);
+      box.appendChild(
+        h("div", { class: "hitem", title: item.error || "" }, [
+          h("span", {
+            class: "hdot " + (item.ok ? "ok" : "bad"),
+            text: item.ok ? "✓" : "✗",
+          }),
+          h("span", { class: "htime", text: new Date(item.ts).toLocaleTimeString() }),
+          h("span", {
+            class: "hmodel",
+            text: (item.replay ? "[回放] " : "") + (model || "未知模型"),
+          }),
+          h("span", { class: "hms", text: (ms / 1000).toFixed(1) + "s" }),
+          h("span", { class: "htok", text: item.total ? fmtNum(item.total) : "" }),
+        ])
+      );
     }
   }
 
@@ -1393,6 +1718,15 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
         : "无";
     if (ui.okCount) ui.okCount.textContent = String(state.stats.success);
     if (ui.badCount) ui.badCount.textContent = String(state.stats.fail);
+    if (ui.apiHost) ui.apiHost.textContent = apiBase();
+    if (ui.apiKey) ui.apiKey.textContent = state.apiKey;
+    if (ui.tokenTotal) ui.tokenTotal.textContent = fmtNum(state.tokens.total);
+    if (ui.tokenDetail) {
+      const last = state.tokens.last;
+      ui.tokenDetail.textContent = last
+        ? "上次 " + fmtNum(last.prompt) + " in / " + fmtNum(last.completion) + " out"
+        : "上次 —";
+    }
     if (ui.counts) {
       ui.counts.textContent = "✓" + state.stats.success + " ✗" + state.stats.fail;
     }
