@@ -81,6 +81,8 @@ Catiecli / Playground Executor 之所以「装完脚本就能用」，是因为�
 
    Tampermonkey 会弹出安装页，点「安装」。
 
+   > 如果你之前装过旧版 **PG Bridge Executor**，请在 Tampermonkey 里把旧脚本删除，只保留 **Bluebird PG**，避免两个面板同时运行。
+
 3. 登录 <https://aistudio.google.com>，建议打开：
 
    <https://aistudio.google.com/prompts/new_chat?temporary=true>
