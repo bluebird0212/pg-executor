@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import random
@@ -70,6 +71,8 @@ from aistudio_api.infrastructure.waa.signer import extract_content_digest
 HOST = os.getenv("PG_HOST", "127.0.0.1")
 PORT = int(os.getenv("PG_PORT", "8090"))
 JOB_TIMEOUT = float(os.getenv("PG_JOB_TIMEOUT", "300"))
+# 同一请求失败后的冷却时间，期间相同请求直接返回错误，避免客户端自动重试反复消耗额度
+FAILURE_WINDOW = float(os.getenv("PG_FAILURE_WINDOW", "45"))
 EXECUTOR_STALE = float(os.getenv("PG_EXECUTOR_STALE", "45"))
 POLL_WAIT = float(os.getenv("PG_POLL_WAIT", "25"))
 KEEPALIVE = float(os.getenv("PG_SSE_KEEPALIVE", "15"))
@@ -316,11 +319,15 @@ def _lan_addresses() -> list[str]:
 DEFAULT_MODELS = [
     ("gemini-flash-latest", "Gemini Flash Latest (默认)"),
     ("gemini-pro-latest", "Gemini Pro Latest"),
-    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite"),
+    ("gemini-4-argon", "Gemini 4 Argon"),
+    ("gemini-4-carbon", "Gemini 4 Carbon"),
+    ("gemini-4-neon", "Gemini 4 Neon"),
+    ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
     ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-    ("gemini-3.7-flash", "Gemini 3.7 Flash"),
     ("gemini-3.6-flash", "Gemini 3.6 Flash"),
-    ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+    ("gemini-3-flash-preview", "Gemini 3 Flash Preview"),
+    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite"),
+    ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
     ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
     ("gemini-3.1-flash-image", "Nano Banana 2 (图片)"),
     ("gemini-3-pro-image", "Nano Banana Pro (图片)"),
@@ -333,6 +340,7 @@ class Job:
     model: str
     stream: bool
     request_body: str = ""
+    fingerprint: str = ""
     created: float = field(default_factory=time.time)
     events: asyncio.Queue = field(default_factory=asyncio.Queue)
     cancelled: bool = False
@@ -344,6 +352,7 @@ class ExecutorHub:
     def __init__(self) -> None:
         self.jobs: dict[str, Job] = {}
         self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.inflight: dict[str, tuple[str, float]] = {}
         self.last_seen = 0.0
         self.connected_at = 0.0
         self.name = ""
@@ -352,6 +361,55 @@ class ExecutorHub:
         self.cache: dict[str, Any] | None = None
         self.caches: list[dict[str, Any]] = []
         self.total_tasks = 0
+        self.diag = ""
+        self.failures: dict[str, tuple[float, int, str]] = {}
+
+    def duplicate_of(self, fingerprint: str) -> Job | None:
+        """同一份请求还在处理中时，返回原任务，避免重复消耗额度。"""
+        item = self.inflight.get(fingerprint)
+        if not item:
+            return None
+        job_id, ts = item
+        job = self.jobs.get(job_id)
+        if job is None or job.finished or job.cancelled or (time.time() - ts) > JOB_TIMEOUT:
+            self.inflight.pop(fingerprint, None)
+            return None
+        return job
+
+    def track(self, fingerprint: str, job: Job) -> None:
+        if fingerprint:
+            self.inflight[fingerprint] = (job.id, time.time())
+
+    def release(self, job: Job) -> None:
+        fp = job.fingerprint
+        if not fp:
+            return
+        current = self.inflight.get(fp)
+        if current and current[0] == job.id:
+            self.inflight.pop(fp, None)
+
+    def record_failure(self, fingerprint: str, status: int, message: str) -> None:
+        """记录一次失败，短时间内拦截同样的请求，避免自动重试反复消耗额度。"""
+        if not fingerprint:
+            return
+        self.failures[fingerprint] = (time.time(), int(status or 502), message or "")
+        if len(self.failures) > 200:
+            cutoff = time.time() - FAILURE_WINDOW
+            self.failures = {k: v for k, v in self.failures.items() if v[0] >= cutoff}
+
+    def clear_failure(self, fingerprint: str) -> None:
+        if fingerprint:
+            self.failures.pop(fingerprint, None)
+
+    def recent_failure(self, fingerprint: str) -> tuple[int, str] | None:
+        item = self.failures.get(fingerprint)
+        if not item:
+            return None
+        ts, status, message = item
+        if time.time() - ts > FAILURE_WINDOW:
+            self.failures.pop(fingerprint, None)
+            return None
+        return status, message
 
     @property
     def online(self) -> bool:
@@ -383,6 +441,9 @@ class ExecutorHub:
             self.caches = [c for c in caches if isinstance(c, dict)][:10]
             if self.caches:
                 self.cache = self.caches[0]
+        diag = payload.get("diag")
+        if isinstance(diag, str) and diag.strip():
+            self.diag = diag[:3000]
 
     def submit(self, job: Job) -> None:
         self.jobs[job.id] = job
@@ -489,6 +550,7 @@ async def status() -> dict[str, Any]:
             "totalTasks": hub.total_tasks,
             "cache": hub.cache,
             "caches": hub.caches,
+            "diag": hub.diag,
         },
         "activeJobs": len(jobs),
         "models": [{"id": mid, "displayName": name} for mid, name in DEFAULT_MODELS],
@@ -659,11 +721,43 @@ async def model_action(model_path: str, request: Request) -> Response:
         )
 
     stream = action == "streamGenerateContent"
+
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {
+                "model": model,
+                "stream": stream,
+                "contents": body.get("contents"),
+                "system": body.get("systemInstruction") or body.get("system_instruction"),
+                "tools": body.get("tools"),
+                "tool_config": body.get("toolConfig") or body.get("tool_config"),
+                "generation": body.get("generationConfig") or body.get("generation_config"),
+                "safety": body.get("safetySettings") or body.get("safety_settings"),
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if hub.duplicate_of(fingerprint) is not None:
+        return _error(
+            429,
+            "同一请求正在处理中，已阻止重复发送以免重复消耗额度。请等待上一条返回。",
+        )
+    recent = hub.recent_failure(fingerprint)
+    if recent is not None:
+        status, message = recent
+        return _error(
+            status,
+            message + "（相同请求刚刚失败，已暂时阻止重复发送以免继续消耗额度）",
+        )
+
     try:
         job, normalized_model = _prepare_job(model, body, stream)
     except Exception as exc:
         return _error(400, f"invalid Gemini request: {exc}")
 
+    job.fingerprint = fingerprint
+    hub.track(fingerprint, job)
     hub.submit(job)
     if stream:
         return StreamingResponse(
@@ -777,20 +871,27 @@ async def _collect_job(job: Job, model: str) -> Response:
             if kind == "response":
                 raw = str(event.get("rawResponse") or "")
                 if not raw.strip():
+                    hub.record_failure(job.fingerprint, 502, "上游返回空内容")
                     return _error(502, "上游返回空内容")
+                hub.clear_failure(job.fingerprint)
                 return JSONResponse(_response_payload(model, raw))
             if kind == "chunk":
                 raw_parts.append(str(event.get("chunkBody") or ""))
             elif kind == "end":
                 raw = "".join(raw_parts)
                 if not raw.strip():
+                    hub.record_failure(job.fingerprint, 502, "上游返回空内容")
                     return _error(502, "上游返回空内容")
+                hub.clear_failure(job.fingerprint)
                 return JSONResponse(_response_payload(model, raw))
             elif kind == "error":
                 status, message = _upstream_error(event)
+                hub.record_failure(job.fingerprint, status, message)
                 return _error(status, message)
     finally:
         job.cancelled = True
+        job.finished = True
+        hub.release(job)
         hub.jobs.pop(job.id, None)
 
 
@@ -930,6 +1031,7 @@ async def _consume_stream(
             raw = str(event.get("rawResponse") or "")
             if not raw.strip():
                 state["aborted"] = "empty"
+                hub.record_failure(job.fingerprint, 502, "上游返回空内容")
                 yield _sse_error(502, "上游返回空内容")
                 return
             for parsed in parser.feed(raw):
@@ -939,16 +1041,19 @@ async def _consume_stream(
                 for line in _chunk_events(parsed, state, job.model, only_text):
                     yield line
             state["ended"] = True
+            hub.clear_failure(job.fingerprint)
             return
         elif kind == "end":
             for parsed in parser.finish():
                 for line in _chunk_events(parsed, state, job.model, only_text):
                     yield line
             state["ended"] = True
+            hub.clear_failure(job.fingerprint)
             return
         elif kind == "error":
             status, message = _upstream_error(event)
             state["aborted"] = "error"
+            hub.record_failure(job.fingerprint, status, message)
             yield _sse_error(status, message)
             return
 
@@ -1004,7 +1109,7 @@ async def _stream_job(job: Job, body: dict[str, Any]):
 
         # 没有 finishReason → 判定为流式截断，自动续写一次
         partial = "".join(state.get("text_parts") or [])
-        if SETTINGS.get("anti_truncate") and partial.strip() and len(partial) >= 30:
+        if SETTINGS.get("anti_truncate") and partial.strip() and len(partial) >= 200:
             next_job = _make_continuation_job(body, partial, job.model)
             if next_job is not None:
                 current = next_job
@@ -1015,6 +1120,8 @@ async def _stream_job(job: Job, body: dict[str, Any]):
         yield _finish_sse(state, job.model)
     finally:
         job.cancelled = True
+        job.finished = True
+        hub.release(job)
         hub.jobs.pop(job.id, None)
         if current is not job:
             current.cancelled = True
