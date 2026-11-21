@@ -64,12 +64,9 @@
     <a class="btn" href="https://github.com/bluebird0212/pg-executor/releases/latest" target="_blank" rel="noreferrer">下载 Windows 服务</a>
     <details>
       <summary>没有电脑？完全在手机上运行（Termux）</summary>
-      <pre>pkg update -y
-pkg install python git -y
-git clone https://github.com/bluebird0212/pg-executor.git
-cd pg-executor
-bash start.sh</pre>
-      <div class="hint">Termux 方案需要下载依赖，速度取决于网络；日常更推荐电脑跑服务。</div>
+      <pre>pkg install -y curl
+curl -fsSL https://raw.githubusercontent.com/bluebird0212/pg-executor/main/termux.sh | bash</pre>
+      <div class="hint">会自动安装 Ubuntu + Python 依赖，首次需要几百 MB；旧手机需要保持 Termux 在后台运行。</div>
     </details>
   </div>
 
