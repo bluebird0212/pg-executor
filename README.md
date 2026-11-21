@@ -9,6 +9,8 @@
 - 电脑和 Android 手机都能用：服务跑在本机，油猴脚本跑在 AI Studio 页面。
 
 > 仅供个人学习研究，请遵守 Google 的服务条款，不要用于商业或滥用。
+>
+> **手机一键安装页**：<https://bluebird0212.github.io/pg-executor/install.html>
 
 ---
 
@@ -87,11 +89,12 @@ Catiecli / Playground Executor 之所以「装完脚本就能用」，是因为�
 1. 浏览器安装 **Tampermonkey** 扩展。
 2. 打开安装链接：
 
-   <https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js>
+   <https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js>
 
    Tampermonkey 会弹出安装页，点「安装」。
 
-   > 如果你之前装过旧版 **PG Bridge Executor**，请在 Tampermonkey 里把旧脚本删除，只保留 **Bluebird PG**，避免两个面板同时运行。
+   > 如果 raw.githubusercontent.com 打不开，可以改用 jsDelivr 链接；两个地址内容一样。
+   > 之前装过旧版 **PG Bridge Executor** 的，请在 Tampermonkey 里删除旧脚本，只保留 **Bluebird PG**。
 
 3. 登录 <https://aistudio.google.com>，建议打开：
 
@@ -205,14 +208,23 @@ NextChat / Cherry Studio 等：
 
 **Q：页面上完全看不到 Bluebird PG 面板？**
 
-1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.4.0**。
+1. 在 Tampermonkey 里确认脚本已启用，版本是 **1.4.1**。
 2. 新装的脚本不会注入已经打开的标签页，**必须刷新 AI Studio 页面**。
 3. 确认当前地址是 `https://aistudio.google.com/...`，脚本只匹配这个域名。
 4. 面板固定在右下角，标题栏会显示 `✓成功 ✗失败` 次数；连接失败时面板里会出现红色错误行。
 5. 如果仍然看不到，按 `F12` 打开 Console，看有没有 `[Bluebird-PG] 脚本已加载`：
    - 没有这条日志：脚本没运行，检查 Tampermonkey 图标、是否无痕模式、是否被其他扩展禁用。
    - 有日志但没有面板：把 Console 里的红色报错截图发 Issue。
-6. 1.4.0 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+6. 1.4.1 会每 2.5 秒自动把面板重新挂回页面，AI Studio 切换会话导致 DOM 重建后也会自动恢复；同时已移除 `innerHTML`，兼容 AI Studio 的 Trusted Types 限制。
+
+**Q：更新时出现 “This page is used as an intermediate step…” 页面怎么办？**
+
+这是 Tampermonkey 的安装中转页，正常情况下会自动关闭并弹出安装/更新确认。如果一直停在这里：
+
+1. 重新打开 <https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js>，等 2~3 秒。
+2. 还不行就打开 Tampermonkey 面板 →「实用工具」→「从 URL 安装」，粘贴上面的 jsDelivr 链接。
+3. 或者 Tampermonkey →「添加新脚本」，把脚本内容整段粘贴进去，Ctrl+S 保存。
+4. 更新后刷新 AI Studio，确认面板版本是 **1.4.1**。
 
 **Q：一定要用 exe 吗？没有更简单的办法吗？**
 
