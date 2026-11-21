@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.4.1
-// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持缓存回放、请求历史、Token 统计和夜间模式。
+// @version      1.5.0
+// @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js
 // @downloadURL  https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js
@@ -28,6 +28,7 @@
   const TEMP_CHAT_URL = "https://aistudio.google.com/prompts/new_chat?temporary=true";
   const BOOTSTRAP_PROMPT = "hi";
   const MAX_CACHE_BYTES = 8 * 1024 * 1024;
+  const MAX_TOTAL_CACHE_BYTES = 24 * 1024 * 1024;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -97,7 +98,13 @@
     polling: false,
     currentTask: null,
     replayArmed: false,
-    cache: null,
+    replayCacheId: null,
+    caches: [],
+    autoBootstrap: String(pick("pgbridge.autobootstrap", "1")) !== "0",
+    autoBootstrapTried: false,
+    shield: { enabled: true, mode: "deep" },
+    antiTruncate: true,
+    shieldLoaded: false,
     stats: { success: 0, fail: 0 },
     tokens: { prompt: 0, completion: 0, total: 0, last: null },
     history: [],
@@ -131,10 +138,41 @@
   }
 
   try {
-    const rawCache = pick("pgbridge.cache", "");
-    if (rawCache) state.cache = JSON.parse(rawCache);
+    const rawCaches = pick("pgbridge.caches", "");
+    if (rawCaches) {
+      const parsed = JSON.parse(rawCaches);
+      if (Array.isArray(parsed)) {
+        state.caches = parsed
+          .filter((c) => c && typeof c === "object" && typeof c.raw === "string" && c.raw)
+          .slice(0, 10)
+          .map((c, i) => ({
+            id: String(c.id || "c" + (i + 1)),
+            ts: Number(c.ts) || Date.now(),
+            model: String(c.model || ""),
+            stream: !!c.stream,
+            raw: c.raw,
+          }));
+      }
+    }
+    if (!state.caches.length) {
+      const rawCache = pick("pgbridge.cache", "");
+      if (rawCache) {
+        const old = JSON.parse(rawCache);
+        if (old && typeof old.raw === "string" && old.raw) {
+          state.caches = [
+            {
+              id: "c1",
+              ts: Number(old.ts) || Date.now(),
+              model: String(old.model || ""),
+              stream: !!old.stream,
+              raw: old.raw,
+            },
+          ];
+        }
+      }
+    }
   } catch (_) {
-    state.cache = null;
+    state.caches = [];
   }
   try {
     const rawStats = pick("pgbridge.stats", "");
@@ -261,13 +299,13 @@
   }
 
   function cacheSummary() {
-    if (!state.cache || !state.cache.raw) return null;
-    return {
-      ts: state.cache.ts,
-      model: state.cache.model,
-      stream: !!state.cache.stream,
-      bytes: state.cache.raw.length,
-    };
+    return state.caches.slice(0, 10).map((c) => ({
+      id: c.id,
+      ts: c.ts,
+      model: c.model,
+      stream: !!c.stream,
+      chars: c.raw ? c.raw.length : 0,
+    }));
   }
 
   async function postResult(payload) {
@@ -299,7 +337,7 @@
             name: "aistudio-page",
             version: VERSION,
             models: [],
-            cache: cacheSummary(),
+            caches: cacheSummary(),
             stats: state.stats,
           },
           40000
@@ -309,6 +347,7 @@
           state.connected = true;
           state.lastError = "";
           delay = 400;
+          onServerReady();
           continue;
         }
         if (resp.status !== 200 || !resp.data || !resp.data.task) {
@@ -317,6 +356,7 @@
         state.connected = true;
         state.lastError = "";
         delay = 400;
+        onServerReady();
         const task = resp.data.task;
         try {
           await handleTask(task);
@@ -345,6 +385,57 @@
         await sleep(delay);
         delay = Math.min(5000, delay + 700);
       }
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // 连接成功后的懒人动作：同步护盾状态 + 自动发送引导 hi
+  // ------------------------------------------------------------------
+
+  let shieldLoadedOnce = false;
+
+  function onServerReady() {
+    if (!shieldLoadedOnce) {
+      shieldLoadedOnce = true;
+      loadShieldState();
+    }
+    if (!state.autoBootstrap || state.autoBootstrapTried || waaReady()) return;
+    state.autoBootstrapTried = true;
+    setTimeout(() => {
+      if (waaReady()) return;
+      log("已连接服务，自动发送引导 hi…");
+      bootstrap().catch((err) => log("自动引导失败: " + ((err && err.message) || err)));
+    }, 2500);
+  }
+
+  async function loadShieldState() {
+    try {
+      const resp = await request("GET", "/api/shield", null, 6000);
+      if (resp.status === 200 && resp.data && typeof resp.data === "object") {
+        state.shield = {
+          enabled: !!resp.data.enabled,
+          mode: resp.data.mode === "standard" ? "standard" : "deep",
+        };
+        state.antiTruncate = !!resp.data.antiTruncate;
+        renderStatus();
+      }
+    } catch (_) {}
+  }
+
+  async function saveShieldState() {
+    try {
+      await request(
+        "POST",
+        "/api/shield",
+        {
+          enabled: state.shield.enabled,
+          mode: state.shield.mode,
+          antiTruncate: state.antiTruncate,
+        },
+        6000
+      );
+    } catch (err) {
+      log("保存护盾设置失败: " + ((err && err.message) || err));
     }
   }
 
@@ -750,12 +841,26 @@
 
   function saveCache(model, stream, raw) {
     if (!raw || raw.length > MAX_CACHE_BYTES) return;
-    state.cache = { ts: Date.now(), model, stream: !!stream, raw };
+    state.caches.unshift({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      ts: Date.now(),
+      model: model || "",
+      stream: !!stream,
+      raw,
+    });
+    if (state.caches.length > 10) state.caches.length = 10;
+    let total = state.caches.reduce((sum, c) => sum + (c.raw ? c.raw.length : 0), 0);
+    while (state.caches.length > 1 && total > MAX_TOTAL_CACHE_BYTES) {
+      const removed = state.caches.pop();
+      total -= removed && removed.raw ? removed.raw.length : 0;
+    }
     try {
-      save("pgbridge.cache", JSON.stringify(state.cache));
+      save("pgbridge.caches", JSON.stringify(state.caches));
     } catch (err) {
       log("缓存保存失败: " + (err && err.message));
     }
+    renderCaches();
+    renderStatus();
   }
 
   function bumpStats(ok) {
@@ -896,10 +1001,11 @@
     return out;
   }
 
-  async function replayTask(task) {
-    const raw = state.cache && state.cache.raw;
+  async function replayTask(task, entry) {
+    const raw = entry && entry.raw;
     if (!raw) throw new Error("没有可用缓存");
     state.replayArmed = false;
+    state.replayCacheId = null;
     if (task.stream) {
       const pieces = splitChunks(raw, 4096);
       for (const piece of pieces) {
@@ -909,7 +1015,14 @@
     } else {
       await postResult({ id: task.id, kind: "response", status: 200, rawResponse: raw });
     }
-    log("缓存回放完成（" + raw.length + " 字符）");
+    log(
+      "缓存回放完成（" +
+        new Date(entry.ts).toLocaleTimeString() +
+        " · " +
+        raw.length +
+        " 字符）"
+    );
+    renderStatus();
     return null;
   }
 
@@ -1006,10 +1119,13 @@
     renderStatus();
     await postResult({ id: task.id, kind: "ack" });
     const startedAt = Date.now();
-    const usedReplay = !!(state.replayArmed && state.cache && state.cache.raw);
+    const replayEntry = state.replayArmed
+      ? state.caches.find((c) => c.id === state.replayCacheId) || state.caches[0]
+      : null;
+    const usedReplay = !!(replayEntry && replayEntry.raw);
     if (usedReplay) log("使用缓存回放 " + String(task.id).slice(0, 8));
     try {
-      const usage = usedReplay ? await replayTask(task) : await executeTask(task);
+      const usage = usedReplay ? await replayTask(task, replayEntry) : await executeTask(task);
       const ms = Date.now() - startedAt;
       bumpStats(true);
       bumpTokens(usage);
@@ -1160,8 +1276,11 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
 .stat.busy b{color:var(--accent)}
 .line{display:flex;gap:6px;align-items:center;color:var(--muted);font-size:11.5px;min-width:0}
 .strong{color:var(--fg);font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.footerRow{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.footerRow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
 .footerRow .btn{padding:0 4px;font-size:10.5px}
+.mini{flex:none;height:22px;padding:0 7px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);font:inherit;font-size:9.5px;cursor:pointer;white-space:nowrap}
+.mini:hover{border-color:var(--accent);color:var(--accent)}
+.mini.on{background:linear-gradient(135deg,#8fb0dd,#7799cc);border-color:transparent;color:#fff}
 .log{display:none;white-space:pre-wrap;word-break:break-word;max-height:180px;overflow:auto;background:var(--input);border:1px solid var(--line);border-radius:12px;padding:8px 10px;font:10.5px/1.55 ui-monospace,Consolas,monospace;color:var(--muted)}
 .log.show{display:block}
 .apiBox{display:flex;flex-direction:column;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 11px}
@@ -1320,9 +1439,16 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       placeholder: "http://127.0.0.1:8090",
     });
     const saveBtn = h("button", { class: "btn", id: "save", type: "button", text: "保存" });
+    const lanBtn = h("button", {
+      class: "btn",
+      id: "lan",
+      type: "button",
+      text: "🏠 局域网",
+      title: "自动获取本机局域网地址并填写",
+    });
     const serverField = h("div", { class: "field" }, [
       h("div", { class: "label", text: "本地服务地址" }),
-      h("div", { class: "inputRow" }, [serverInput, saveBtn]),
+      h("div", { class: "inputRow" }, [serverInput, lanBtn, saveBtn]),
     ]);
 
     const apiHostText = h("span", { class: "apiValue", id: "apiHost", text: "—" });
@@ -1422,10 +1548,18 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     const historyBox = h("div", { class: "historyWrap", id: "history" });
 
     const cacheInfo = h("span", { class: "strong", id: "cacheInfo", text: "无" });
+    const cacheBtn = h("button", {
+      class: "btn",
+      id: "cacheBtn",
+      type: "button",
+      text: "📦 管理",
+    });
     const cacheRow = h("div", { class: "line" }, [
       h("span", { class: "label", text: "缓存" }),
       cacheInfo,
+      cacheBtn,
     ]);
+    const cacheWrap = h("div", { class: "historyWrap", id: "cacheList" });
 
     const keepaliveBtn = h("button", {
       class: "btn",
@@ -1441,7 +1575,23 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       type: "button",
       text: "🌐 后台",
     });
+    const autoBootBtn = h("button", {
+      class: "btn",
+      id: "autoboot",
+      type: "button",
+      text: "✨ 自动引导",
+      title: "连接成功后自动发送一条 hi 完成签名引导",
+    });
+    const shieldBtn = h("button", {
+      class: "btn",
+      id: "shield",
+      type: "button",
+      text: "🛡 防路由",
+      title: "切换服务端防路由护盾与防截断",
+    });
     const footerRow = h("div", { class: "footerRow" }, [
+      autoBootBtn,
+      shieldBtn,
       keepaliveBtn,
       logBtn,
       copyBtn,
@@ -1459,6 +1609,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       statsRow,
       tokenRow,
       cacheRow,
+      cacheWrap,
       historyBtn,
       historyBox,
       footerRow,
@@ -1485,6 +1636,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       download: downloadBtn,
       retrySetup: retrySetupBtn,
       server: serverInput,
+      lan: lanBtn,
       save: saveBtn,
       apiHost: apiHostText,
       apiKey: apiKeyText,
@@ -1501,6 +1653,10 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       replay: replayBtn,
       clear: clearBtn,
       cacheInfo,
+      cacheBtn,
+      cacheWrap,
+      autoBoot: autoBootBtn,
+      shield: shieldBtn,
       okCount,
       badCount,
       taskState,
@@ -1522,6 +1678,32 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       save("pgbridge.server", state.server);
       log("服务器地址已保存: " + state.server);
       renderStatus();
+    });
+    ui.lan.addEventListener("click", async () => {
+      log("正在获取局域网地址…");
+      try {
+        const resp = await requestTo(state.server, "GET", "/api/status", null, 6000);
+        const net = resp.data && resp.data.network;
+        const port = (net && net.port) || 8090;
+        const lan = net && Array.isArray(net.lan)
+          ? net.lan.filter((ip) => ip && !/^127\./.test(ip))
+          : [];
+        if (!lan.length) {
+          notify("没检测到局域网地址，请手动填写", false);
+          return;
+        }
+        const next = normalizeServer("http://" + lan[0] + ":" + port);
+        state.server = next;
+        state.connected = false;
+        ui.server.value = next;
+        save("pgbridge.server", next);
+        log("已自动填写局域网地址: " + next);
+        notify("已切换为局域网地址：" + next, true);
+        renderStatus();
+        discoverServer().catch(() => {});
+      } catch (err) {
+        notify("获取局域网地址失败: " + ((err && err.message) || err), false);
+      }
     });
     ui.reconnect.addEventListener("click", () => {
       state.connected = false;
@@ -1572,20 +1754,44 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       bootstrap().catch((err) => log("引导失败: " + err.message));
     });
     ui.replay.addEventListener("click", () => {
-      if (!state.cache || !state.cache.raw) {
+      if (!state.caches.length) {
         log("当前没有缓存，先成功执行一次请求");
         return;
       }
-      state.replayArmed = true;
-      log("已准备：下一次请求将直接回放缓存");
-      renderStatus();
+      if (state.caches.length === 1) {
+        armReplay(state.caches[0].id);
+        return;
+      }
+      ui.cacheWrap.classList.add("show");
+      renderCaches();
+      log("有多份缓存，请在列表里选择要回放的那一份");
+    });
+    ui.cacheBtn.addEventListener("click", () => {
+      ui.cacheWrap.classList.toggle("show");
+      renderCaches();
     });
     ui.clear.addEventListener("click", () => {
-      state.cache = null;
+      state.caches = [];
       state.replayArmed = false;
+      state.replayCacheId = null;
+      save("pgbridge.caches", "[]");
       save("pgbridge.cache", "");
       log("缓存已清空");
+      renderCaches();
       renderStatus();
+    });
+    ui.autoBoot.addEventListener("click", () => {
+      state.autoBootstrap = !state.autoBootstrap;
+      save("pgbridge.autobootstrap", state.autoBootstrap ? "1" : "0");
+      log("自动引导已" + (state.autoBootstrap ? "开启" : "关闭"));
+      renderStatus();
+    });
+    ui.shield.addEventListener("click", async () => {
+      state.shield.enabled = !state.shield.enabled;
+      renderStatus();
+      await saveShieldState();
+      log("防路由护盾已" + (state.shield.enabled ? "开启" : "关闭"));
+      notify("防路由护盾已" + (state.shield.enabled ? "开启（" + (state.shield.mode === "deep" ? "深度" : "标准") + "）" : "关闭"), true);
     });
     ui.keepalive.addEventListener("click", toggleKeepAlive);
     ui.logbtn.addEventListener("click", () => ui.log.classList.toggle("show"));
@@ -1623,6 +1829,7 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     renderStatus();
     renderLog();
     renderHistory();
+    renderCaches();
     applyTheme();
   }
 
@@ -1651,6 +1858,67 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
       buildPanel();
     } catch (err) {
       buildFallback(err);
+    }
+  }
+
+  function armReplay(id) {
+    const entry = state.caches.find((c) => c.id === id);
+    if (!entry) return;
+    state.replayArmed = true;
+    state.replayCacheId = id;
+    log("已准备：下一次请求将回放 " + new Date(entry.ts).toLocaleTimeString() + " 的缓存");
+    renderCaches();
+    renderStatus();
+  }
+
+  function renderCaches() {
+    const ui = state.ui;
+    if (!ui || !ui.cacheWrap) return;
+    const box = ui.cacheWrap;
+    box.textContent = "";
+    if (!state.caches.length) {
+      box.appendChild(h("div", { class: "hempty", text: "还没有缓存，成功执行一次请求后就会出现在这里" }));
+      return;
+    }
+    for (const c of state.caches) {
+      const armed = state.replayArmed && state.replayCacheId === c.id;
+      const playBtn = h("button", {
+        class: "mini" + (armed ? " on" : ""),
+        type: "button",
+        text: armed ? "已选" : "回放",
+      });
+      playBtn.addEventListener("click", () => armReplay(c.id));
+      const delBtn = h("button", { class: "mini", type: "button", text: "🗑" });
+      delBtn.addEventListener("click", () => {
+        state.caches = state.caches.filter((x) => x.id !== c.id);
+        if (state.replayCacheId === c.id) {
+          state.replayArmed = false;
+          state.replayCacheId = null;
+        }
+        try {
+          save("pgbridge.caches", JSON.stringify(state.caches));
+        } catch (_) {}
+        renderCaches();
+        renderStatus();
+      });
+      box.appendChild(
+        h("div", { class: "hitem" }, [
+          h("span", {
+            class: "htime",
+            text: new Date(c.ts).toLocaleTimeString(),
+          }),
+          h("span", {
+            class: "hmodel",
+            text: String(c.model || "未知模型").replace(/^models\//, ""),
+          }),
+          h("span", {
+            class: "htok",
+            text: Math.round((c.raw ? c.raw.length : 0) / 1024) + "KB",
+          }),
+          playBtn,
+          delBtn,
+        ])
+      );
     }
   }
 
@@ -1704,18 +1972,25 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
           ? "连接中…"
           : "未连接";
     if (ui.setup) ui.setup.classList.toggle("show", !state.connected);
-    ui.waa.textContent = waaReady() ? "签名已就绪" : "签名未就绪";
+    ui.waa.textContent = waaReady()
+      ? "签名已就绪"
+      : state.connected
+        ? "签名未就绪 · 首次请求会自动引导"
+        : "签名未就绪";
     ui.waa.style.color = waaReady() ? "var(--ok)" : "var(--muted)";
-    ui.cacheInfo.textContent =
-      state.cache && state.cache.raw
-        ? new Date(state.cache.ts).toLocaleTimeString() +
-          " · " +
-          state.cache.model +
-          " · " +
-          Math.round(state.cache.raw.length / 1024) +
-          " KB" +
-          (state.replayArmed ? " · 待回放" : "")
-        : "无";
+    if (ui.cacheInfo) {
+      if (!state.caches.length) {
+        ui.cacheInfo.textContent = "无";
+      } else {
+        const armed = state.replayArmed
+          ? state.caches.find((c) => c.id === state.replayCacheId) || state.caches[0]
+          : null;
+        ui.cacheInfo.textContent =
+          state.caches.length +
+          " 份" +
+          (armed ? " · 待回放 " + new Date(armed.ts).toLocaleTimeString() : "");
+      }
+    }
     if (ui.okCount) ui.okCount.textContent = String(state.stats.success);
     if (ui.badCount) ui.badCount.textContent = String(state.stats.fail);
     if (ui.apiHost) ui.apiHost.textContent = apiBase();
@@ -1741,8 +2016,22 @@ font:13px/1.5 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei"
     if (ui.taskStat) {
       ui.taskStat.className = "stat" + (state.currentTask ? " busy" : "");
     }
-    ui.replay.disabled = !(state.cache && state.cache.raw);
+    ui.replay.disabled = !state.caches.length;
     ui.keepalive.textContent = state.keepAlive ? "🔔 保活中" : "🔔 保活";
+    if (ui.autoBoot) {
+      ui.autoBoot.textContent = state.autoBootstrap ? "✨ 自动引导·开" : "✨ 自动引导·关";
+      ui.autoBoot.className = "btn" + (state.autoBootstrap ? " primary" : "");
+    }
+    if (ui.shield) {
+      const on = !!state.shield.enabled;
+      ui.shield.textContent = "🛡 防路由·" + (on ? (state.shield.mode === "deep" ? "深度" : "标准") : "关");
+      ui.shield.className = "btn" + (on ? " primary" : "");
+      ui.shield.title =
+        "服务端防路由护盾：" +
+        (on ? "已开启（" + (state.shield.mode === "deep" ? "深度" : "标准") + "）" : "已关闭") +
+        "；防截断：" +
+        (state.antiTruncate ? "开" : "关");
+    }
     if (state.lastError && !state.connected) ui.conn.title = state.lastError;
     ui.dot.title = state.lastError || (state.connected ? "已连接本地服务" : "未连接本地服务");
   }

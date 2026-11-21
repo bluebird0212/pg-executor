@@ -11,8 +11,12 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import os
+import random
+import re
+import socket
 import sys
 import time
 import uuid
@@ -71,17 +75,255 @@ POLL_WAIT = float(os.getenv("PG_POLL_WAIT", "25"))
 KEEPALIVE = float(os.getenv("PG_SSE_KEEPALIVE", "15"))
 ACCESS_TOKEN = os.getenv("PG_TOKEN", "").strip()
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in ("0", "false", "off", "no", "")
+
+
+# 运行时开关（面板可以修改）
+SETTINGS = {
+    "shield": _env_flag("PG_SHIELD", True),
+    "shield_mode": "standard" if os.getenv("PG_SHIELD_MODE", "").lower() == "standard" else "deep",
+    "anti_truncate": _env_flag("PG_ANTI_TRUNCATE", True),
+}
+
+
+# --------------------------------------------------------------------------
+# 防路由护盾（移植自「通用 Gemini 防路由护盾 v3.2」，适配无酒馆上下文的服务端）
+# --------------------------------------------------------------------------
+
+_SAFE_LETTERS = "bcdfghjklmnpqrstvxzBCDFGHJKLMNPQRSTVXZ"
+_SAFE_DIGITS = "0123456789"
+_COMMENT_OPEN = "<" + "!" + "-- "
+_COMMENT_CLOSE = " --" + ">"
+
+_MARKER_RE = re.compile(
+    r"(?:\{\{|\[|<)?[ \t]*(?:izumi[ \t_-]*|gemini[ \t_-]*)?anti[ \t_-]*route[ \t]*(?:\}\}|\]|\/?>)?",
+    re.I,
+)
+_PROTECTED_RE = re.compile(
+    r"\[\[IZUMI_CHAT_INDEX_V1\]\]"
+    r"|<\s*\/?\s*(?:customfunction|worldcustomfunction|worldsystem|KonataExtraInformation|IzumiEdit"
+    r"|UpdateVariable|JSONPatch|mvu|stat_data|delta_data|variables|StatusPlaceHolderImpl)\b"
+    r"|IZW7_|IZM7_",
+    re.I,
+)
+
+# 固定套话同义微替换（只动常见预设锚点，改变分词边界）
+_SIGNATURE_VARIANTS: list[tuple[str, list[str]]] = [
+    ("请严格遵守以下创作规则", ["请严格遵守以下创作规则", "请务必遵循下述创作规则", "请严格按照以下创作规范执行", "请认真遵守下列创作准则"]),
+    ("接下来请根据以上设定", ["接下来请根据以上设定", "下面请依据上述设定", "接下来请结合上方设定", "随后请按照以上背景与设定"]),
+    ("正式开始创作前，请先进行思考", ["正式开始创作前，请先进行思考", "在正式动笔创作前，请先展开构思", "正式开始撰写正文前，请先理清思路", "开始正式创作之前，请先进行推演"]),
+    ("正文必须使用简体中文", ["正文必须使用简体中文", "正文部分须采用简体中文", "正文内容必须以简体中文撰写", "请确保正文使用简体中文"]),
+    ("专注调制特调饮品一样", ["专注调制特调饮品一样", "专注调配特调酒饮一样", "专心调制特调饮品那样", "专注调制专属特调一样"]),
+    ("抽丝剥茧摸清故事脉络", ["抽丝剥茧摸清故事脉络", "抽丝剥茧理清故事脉络", "抽丝剥茧梳理剧情脉络", "丝丝入扣摸清故事脉络"]),
+    ("把你的故事和设定推过来吧，我的杯子已经准备好了", ["把你的故事和设定推过来吧，我的杯子已经准备好了", "把你的设定和故事推过来吧，酒杯已经准备好了", "把故事与设定推过来吧，我的调酒杯已经就绪了", "把你的故事和设定端过来吧，我的杯子已经备好了"]),
+    ("那我们来看分为两部分的创作规则吧", ["那我们来看分为两部分的创作规则吧", "那么我们来看看分为两个部分的创作规则吧", "那我们先来看由两部分组成的创作规则吧", "接下来我们看分为两部分的创作规则吧"]),
+]
+
+
+def _rand_int(min_v: int, max_v: int) -> int:
+    return random.randint(min_v, max(min_v, max_v))
+
+
+def _random_safe_token(length: int) -> str:
+    chars: list[str] = []
+    for _ in range(length):
+        pool = _SAFE_DIGITS if random.random() < 0.30 else _SAFE_LETTERS
+        chars.append(random.choice(pool))
+    if length >= 2:
+        if not any(ch in _SAFE_DIGITS for ch in chars):
+            chars[random.randrange(length)] = random.choice(_SAFE_DIGITS)
+        if not any(ch in _SAFE_LETTERS for ch in chars):
+            chars[random.randrange(length)] = random.choice(_SAFE_LETTERS)
+    return "".join(chars)
+
+
+def _build_comment_block(count_min: int, count_max: int, char_min: int, char_max: int) -> str:
+    count = _rand_int(count_min, count_max)
+    parts = [
+        _COMMENT_OPEN + _random_safe_token(_rand_int(char_min, char_max)) + _COMMENT_CLOSE
+        for _ in range(count)
+    ]
+    return "".join(parts)
+
+
+def _micro_jitter(text: str) -> str:
+    if not isinstance(text, str) or len(text) < 20:
+        return text
+    out = text
+    for needle, choices in _SIGNATURE_VARIANTS:
+        if needle in out:
+            out = out.replace(needle, random.choice(choices))
+    lines = out.split("\n")
+    if len(lines) > 2:
+        for i in range(len(lines) - 1):
+            line = lines[i]
+            if len(line) > 10 and not line.rstrip().endswith((">", "}", "%")) and random.random() < 0.45:
+                lines[i] = line + " " * _rand_int(1, 3)
+        out = "\n".join(lines)
+    return out
+
+
+def _shield_text(text: str, prefix: str, suffix: str, mode: str) -> str:
+    if not isinstance(text, str):
+        return text
+    if _MARKER_RE.search(text):
+        text = _MARKER_RE.sub(
+            lambda _m: _build_comment_block(15, 45, 16, 42), text
+        )
+    if mode == "deep":
+        text = _micro_jitter(text)
+    if prefix:
+        text = prefix + text
+    if suffix:
+        text = text + suffix
+    return text
+
+
+def _parts_text(content: dict[str, Any]) -> str:
+    parts = content.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    return "".join(
+        p.get("text") or ""
+        for p in parts
+        if isinstance(p, dict) and isinstance(p.get("text"), str)
+    )
+
+
+def apply_anti_route_shield(body: dict[str, Any]) -> None:
+    """在编码前对 Gemini 请求做防路由混淆，直接原地修改 body。"""
+    if not SETTINGS.get("shield"):
+        return
+    mode = SETTINGS.get("shield_mode") or "deep"
+    system = body.get("systemInstruction") or body.get("system_instruction")
+    contents = body.get("contents")
+    if not isinstance(contents, list):
+        contents = []
+
+    first_system = False
+    first_user = False
+    first_model = False
+
+    # 保护段 ∪ 尾部定位：最后一个可改写的内容块
+    last_idx = -1
+    for i in range(len(contents) - 1, -1, -1):
+        item = contents[i]
+        if not isinstance(item, dict):
+            continue
+        text = _parts_text(item)
+        if text.strip() and not _PROTECTED_RE.search(text):
+            last_idx = i
+            break
+
+    # systemInstruction：单独在首部注入混淆注释
+    if isinstance(system, dict):
+        parts = system.get("parts")
+        if isinstance(parts, list):
+            for part in parts:
+                if not isinstance(part, dict):
+                    continue
+                text = part.get("text")
+                if not isinstance(text, str) or not text.strip() or _PROTECTED_RE.search(text):
+                    continue
+                prefix = ""
+                if not first_system:
+                    first_system = True
+                    prefix = _build_comment_block(16, 36, 16, 42) + "\n"
+                part["text"] = _shield_text(text, prefix, "", mode)
+
+    for idx, item in enumerate(contents):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().lower()
+        parts = item.get("parts")
+        if not isinstance(parts, list):
+            continue
+        is_last = idx == last_idx
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            # 函数调用 / 图片 / 受保护块一律不改
+            if part.get("functionCall") or part.get("functionResponse") or part.get("inlineData"):
+                continue
+            if _PROTECTED_RE.search(text):
+                continue
+            has_advice = "<advice" in text.lower() or "按照advice继续" in text
+
+            prefix = ""
+            suffix = ""
+            if role == "system":
+                if not first_system:
+                    first_system = True
+                    prefix = _build_comment_block(16, 36, 16, 42) + "\n"
+                elif mode == "deep" and is_last:
+                    suffix = "\n" + _build_comment_block(8, 20, 16, 42)
+            elif role in ("user", "human"):
+                if not first_user:
+                    first_user = True
+                    prefix = _build_comment_block(8, 20, 16, 42) + "\n"
+                elif mode == "deep" and is_last:
+                    suffix = "\n" + _build_comment_block(8, 20, 16, 42)
+                elif mode == "deep" and len(text) >= 150 and not has_advice:
+                    prefix = _build_comment_block(4, 10, 16, 42) + "\n"
+            elif role in ("model", "assistant", "ai"):
+                if not first_model:
+                    first_model = True
+                    prefix = _build_comment_block(8, 20, 16, 42) + "\n"
+                elif mode == "deep" and is_last:
+                    suffix = "\n" + _build_comment_block(8, 20, 16, 42)
+
+            if not prefix and not suffix and mode != "deep":
+                continue
+            part["text"] = _shield_text(text, prefix, suffix, mode)
+
+
+def _lan_addresses() -> list[str]:
+    """列出本机的局域网 IPv4（优先返回默认出口网卡地址）。"""
+    now = time.time()
+    cached = getattr(_lan_addresses, "_cache", None)
+    if cached and now - cached[0] < 30:
+        return cached[1]
+    ips: list[str] = []
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            ips.append(sock.getsockname()[0])
+        finally:
+            sock.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = str(info[4][0])
+            if ip not in ips:
+                ips.append(ip)
+    except OSError:
+        pass
+    ips = [ip for ip in ips if ip and not ip.startswith("127.")]
+    _lan_addresses._cache = (now, ips)
+    return ips
+
+
 DEFAULT_MODELS = [
+    ("gemini-flash-latest", "Gemini Flash Latest (默认)"),
+    ("gemini-pro-latest", "Gemini Pro Latest"),
+    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite"),
     ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-    ("gemini-3.7-flash", "Gemini 3.7 Flash (默认)"),
+    ("gemini-3.7-flash", "Gemini 3.7 Flash"),
     ("gemini-3.6-flash", "Gemini 3.6 Flash"),
     ("gemini-3.5-flash", "Gemini 3.5 Flash"),
-    ("gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite"),
     ("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
     ("gemini-3.1-flash-image", "Nano Banana 2 (图片)"),
     ("gemini-3-pro-image", "Nano Banana Pro (图片)"),
-    ("gemini-flash-latest", "Gemini Flash Latest"),
-    ("gemini-pro-latest", "Gemini Pro Latest"),
 ]
 
 
@@ -108,6 +350,7 @@ class ExecutorHub:
         self.version = ""
         self.models: list[str] = []
         self.cache: dict[str, Any] | None = None
+        self.caches: list[dict[str, Any]] = []
         self.total_tasks = 0
 
     @property
@@ -135,6 +378,11 @@ class ExecutorHub:
         cache = payload.get("cache")
         if isinstance(cache, dict):
             self.cache = cache
+        caches = payload.get("caches")
+        if isinstance(caches, list):
+            self.caches = [c for c in caches if isinstance(c, dict)][:10]
+            if self.caches:
+                self.cache = self.caches[0]
 
     def submit(self, job: Job) -> None:
         self.jobs[job.id] = job
@@ -225,6 +473,12 @@ async def status() -> dict[str, Any]:
     jobs = [j for j in hub.jobs.values() if not j.finished and not j.cancelled]
     return {
         "ok": True,
+        "network": {"port": PORT, "lan": _lan_addresses()},
+        "shield": {
+            "enabled": bool(SETTINGS.get("shield")),
+            "mode": SETTINGS.get("shield_mode") or "deep",
+        },
+        "antiTruncate": bool(SETTINGS.get("anti_truncate")),
         "executor": {
             "online": hub.online,
             "name": hub.name,
@@ -234,10 +488,45 @@ async def status() -> dict[str, Any]:
             "connectedSeconds": int(time.time() - hub.connected_at) if hub.connected_at else 0,
             "totalTasks": hub.total_tasks,
             "cache": hub.cache,
+            "caches": hub.caches,
         },
         "activeJobs": len(jobs),
         "models": [{"id": mid, "displayName": name} for mid, name in DEFAULT_MODELS],
     }
+
+
+@app.get("/api/shield")
+async def get_shield() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "enabled": bool(SETTINGS.get("shield")),
+        "mode": SETTINGS.get("shield_mode") or "deep",
+        "antiTruncate": bool(SETTINGS.get("anti_truncate")),
+    }
+
+
+@app.post("/api/shield")
+async def set_shield(request: Request) -> Response:
+    try:
+        payload = await request.json()
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if "enabled" in payload:
+        SETTINGS["shield"] = bool(payload.get("enabled"))
+    if str(payload.get("mode") or "") in ("deep", "standard"):
+        SETTINGS["shield_mode"] = str(payload.get("mode"))
+    if "antiTruncate" in payload:
+        SETTINGS["anti_truncate"] = bool(payload.get("antiTruncate"))
+    return JSONResponse(
+        {
+            "ok": True,
+            "enabled": bool(SETTINGS.get("shield")),
+            "mode": SETTINGS.get("shield_mode") or "deep",
+            "antiTruncate": bool(SETTINGS.get("anti_truncate")),
+        }
+    )
 
 
 # --------------------------------------------------------------------------
@@ -389,7 +678,11 @@ async def model_action(model_path: str, request: Request) -> Response:
     return await _collect_job(job, normalized_model)
 
 
-def _prepare_job(model: str, body: dict[str, Any], stream: bool) -> tuple[Job, str]:
+def _prepare_job(
+    model: str, body: dict[str, Any], stream: bool, shield: bool = True
+) -> tuple[Job, str]:
+    if shield:
+        apply_anti_route_shield(body)
     gemini_req = GeminiGenerateContentRequest.model_validate(body)
     normalized = normalize_gemini_request(gemini_req, model)
     binding, _digest = extract_content_digest(normalized.contents)
@@ -505,6 +798,7 @@ def _chunk_events(
     parsed: list[Any],
     state: dict[str, Any],
     model: str,
+    only_text: bool = False,
 ) -> list[str]:
     """把一条解析后的 wire chunk 转成若干条 SSE 文本。"""
     out: list[str] = []
@@ -525,7 +819,7 @@ def _chunk_events(
         WIRE_FINISH_REASON_CONTINUING,
     ):
         state["finish"] = candidate.finish_reason
-    if candidate.thinking:
+    if candidate.thinking and not only_text:
         out.append(
             format_sse_event(
                 "thinking",
@@ -536,7 +830,7 @@ def _chunk_events(
             )
             or ""
         )
-    if candidate.reasoning_images:
+    if candidate.reasoning_images and not only_text:
         out.append(
             format_sse_event(
                 "reasoning_images",
@@ -547,7 +841,7 @@ def _chunk_events(
             )
             or ""
         )
-    if candidate.function_calls:
+    if candidate.function_calls and not only_text:
         out.append(
             format_sse_event(
                 "tool_calls",
@@ -558,7 +852,7 @@ def _chunk_events(
             )
             or ""
         )
-    if candidate.images:
+    if candidate.images and not only_text:
         out.append(
             format_sse_event(
                 "images",
@@ -570,6 +864,7 @@ def _chunk_events(
             or ""
         )
     if candidate.text:
+        state.setdefault("text_parts", []).append(candidate.text)
         out.append(
             format_sse_event(
                 "body",
@@ -580,7 +875,7 @@ def _chunk_events(
             )
             or ""
         )
-    elif candidate.text_signature or candidate.standalone_signature:
+    elif not only_text and (candidate.text_signature or candidate.standalone_signature):
         out.append(
             format_sse_event(
                 "thought_signature",
@@ -593,64 +888,137 @@ def _chunk_events(
     return [line for line in out if line]
 
 
-async def _stream_job(job: Job, body: dict[str, Any]):
+async def _consume_stream(
+    job: Job,
+    state: dict[str, Any],
+    only_text: bool,
+    deadline: float,
+):
+    """消费一个任务的执行器事件，产出 SSE 行；结束原因写入 state。"""
     parser = IncrementalJSONStreamParser()
-    state: dict[str, Any] = {"usage": {}, "finish": None, "response_id": None}
-    deadline = time.monotonic() + JOB_TIMEOUT
-    try:
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            state["aborted"] = "timeout"
+            yield _sse_error(504, "执行器超时未返回结果")
+            return
+        try:
+            event = await asyncio.wait_for(
+                job.events.get(), timeout=min(KEEPALIVE, remaining)
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            if not hub.online:
+                state["aborted"] = "offline"
+                yield _sse_error(503, "浏览器执行器已离线，请检查 AI Studio 页面")
+                return
+            if deadline - time.monotonic() <= 0:
+                state["aborted"] = "timeout"
                 yield _sse_error(504, "执行器超时未返回结果")
                 return
-            try:
-                event = await asyncio.wait_for(
-                    job.events.get(), timeout=min(KEEPALIVE, remaining)
-                )
-            except (asyncio.TimeoutError, TimeoutError):
-                if not hub.online:
-                    yield _sse_error(503, "浏览器执行器已离线，请检查 AI Studio 页面")
-                    return
-                if deadline - time.monotonic() <= 0:
-                    yield _sse_error(504, "执行器超时未返回结果")
-                    return
-                yield ": keepalive\n\n"
-                continue
+            yield ": keepalive\n\n"
+            continue
 
-            kind = str(event.get("kind") or "")
-            if kind == "chunk":
-                text = str(event.get("chunkBody") or "")
-                if not text:
-                    continue
-                for parsed in parser.feed(text):
-                    for line in _chunk_events(parsed, state, job.model):
-                        yield line
-            elif kind == "response":
-                raw = str(event.get("rawResponse") or "")
-                if not raw.strip():
-                    yield _sse_error(502, "上游返回空内容")
-                    return
-                for parsed in parser.feed(raw):
-                    for line in _chunk_events(parsed, state, job.model):
-                        yield line
-                for parsed in parser.finish():
-                    for line in _chunk_events(parsed, state, job.model):
-                        yield line
-                yield _finish_sse(state, job.model)
+        kind = str(event.get("kind") or "")
+        if kind == "chunk":
+            text = str(event.get("chunkBody") or "")
+            if not text:
+                continue
+            for parsed in parser.feed(text):
+                for line in _chunk_events(parsed, state, job.model, only_text):
+                    yield line
+        elif kind == "response":
+            raw = str(event.get("rawResponse") or "")
+            if not raw.strip():
+                state["aborted"] = "empty"
+                yield _sse_error(502, "上游返回空内容")
                 return
-            elif kind == "end":
-                for parsed in parser.finish():
-                    for line in _chunk_events(parsed, state, job.model):
-                        yield line
-                yield _finish_sse(state, job.model)
-                return
-            elif kind == "error":
-                status, message = _upstream_error(event)
-                yield _sse_error(status, message)
-                return
+            for parsed in parser.feed(raw):
+                for line in _chunk_events(parsed, state, job.model, only_text):
+                    yield line
+            for parsed in parser.finish():
+                for line in _chunk_events(parsed, state, job.model, only_text):
+                    yield line
+            state["ended"] = True
+            return
+        elif kind == "end":
+            for parsed in parser.finish():
+                for line in _chunk_events(parsed, state, job.model, only_text):
+                    yield line
+            state["ended"] = True
+            return
+        elif kind == "error":
+            status, message = _upstream_error(event)
+            state["aborted"] = "error"
+            yield _sse_error(status, message)
+            return
+
+
+def _make_continuation_job(
+    body: dict[str, Any], partial_text: str, model: str
+) -> Job | None:
+    """根据已生成的半截正文，构造一次「继续写」的任务。"""
+    cont_body = copy.deepcopy(body)
+    contents = cont_body.get("contents")
+    if not isinstance(contents, list) or not contents:
+        return None
+    contents.append({"role": "model", "parts": [{"text": partial_text}]})
+    contents.append(
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "text": "请紧接上文继续输出，从中断处接着写，不要重复已经输出过的内容，也不要重新开头。"
+                }
+            ],
+        }
+    )
+    try:
+        new_job, _model = _prepare_job(model, cont_body, True, shield=False)
+    except Exception:
+        return None
+    hub.submit(new_job)
+    return new_job
+
+
+async def _stream_job(job: Job, body: dict[str, Any]):
+    state: dict[str, Any] = {
+        "usage": {},
+        "finish": None,
+        "response_id": None,
+        "text_parts": [],
+    }
+    current = job
+    try:
+        async for line in _consume_stream(
+            current, state, False, time.monotonic() + JOB_TIMEOUT
+        ):
+            yield line
+
+        if state.get("aborted"):
+            return
+
+        # 正常结束（有 finishReason）直接收尾
+        if state.get("finish") is not None:
+            yield _finish_sse(state, job.model)
+            return
+
+        # 没有 finishReason → 判定为流式截断，自动续写一次
+        partial = "".join(state.get("text_parts") or [])
+        if SETTINGS.get("anti_truncate") and partial.strip() and len(partial) >= 30:
+            next_job = _make_continuation_job(body, partial, job.model)
+            if next_job is not None:
+                current = next_job
+                async for line in _consume_stream(
+                    current, state, True, time.monotonic() + JOB_TIMEOUT
+                ):
+                    yield line
+        yield _finish_sse(state, job.model)
     finally:
         job.cancelled = True
         hub.jobs.pop(job.id, None)
+        if current is not job:
+            current.cancelled = True
+            hub.jobs.pop(current.id, None)
 
 
 def _finish_sse(state: dict[str, Any], model: str) -> str:
@@ -724,6 +1092,7 @@ a{color:#7799cc}
   <div class="kv"><b>给客户端填写的地址</b></div>
   <table>
     <tr><td>API Base URL</td><td><code id="base"></code></td></tr>
+    <tr><td>局域网地址</td><td><code id="lanaddr">检测中…</code></td></tr>
     <tr><td>协议</td><td>Google Gemini（不要选 OpenAI 格式）</td></tr>
     <tr><td>API Key</td><td>随意填任意非空字符</td></tr>
     <tr><td>SillyTavern</td><td>来源选 Google AI Studio，代理地址填上面的 Base URL</td></tr>
@@ -752,7 +1121,11 @@ async function tick(){
     document.getElementById('seen').textContent=e.lastSeenAgo==null?'—':(e.lastSeenAgo+' 秒前');
     document.getElementById('emodels').textContent=(e.models&&e.models.length)?e.models.join(' / '):'使用内置模型列表';
     document.getElementById('jobs').textContent=s.activeJobs||0;
-    document.getElementById('cache').textContent=e.cache&&e.cache.ts?('缓存 '+new Date(e.cache.ts).toLocaleString()):'无缓存';
+    const cl=(e.caches&&e.caches.length)?e.caches.length:0;
+    document.getElementById('cache').textContent=cl?('缓存 '+cl+' 份'+(e.cache&&e.cache.ts?' · 最新 '+new Date(e.cache.ts).toLocaleTimeString():'')):'无缓存';
+    const net=s.network||{};
+    if(net.lan&&net.lan.length){document.getElementById('lanaddr').textContent='http://'+net.lan[0]+':'+(net.port||8090)+'/v1beta';}
+    else{document.getElementById('lanaddr').textContent='仅本机可用（127.0.0.1）';}
   }catch(err){
     document.getElementById('dot').className='dot err';
     document.getElementById('state').textContent='无法连接本服务';
