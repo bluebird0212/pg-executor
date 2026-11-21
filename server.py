@@ -79,6 +79,7 @@ class Job:
     events: asyncio.Queue = field(default_factory=asyncio.Queue)
     cancelled: bool = False
     finished: bool = False
+    ack_at: float = 0.0
 
 
 class ExecutorHub:
@@ -95,7 +96,15 @@ class ExecutorHub:
 
     @property
     def online(self) -> bool:
-        return bool(self.last_seen) and (time.time() - self.last_seen) < EXECUTOR_STALE
+        if self.last_seen and (time.time() - self.last_seen) < EXECUTOR_STALE:
+            return True
+        return any(
+            not job.finished
+            and not job.cancelled
+            and job.ack_at
+            and (time.time() - job.ack_at) < JOB_TIMEOUT
+            for job in self.jobs.values()
+        )
 
     def touch(self, payload: dict[str, Any]) -> None:
         now = time.time()
@@ -186,6 +195,9 @@ async def executor_result(request: Request) -> Response:
     kind = str(payload.get("kind") or "")
     if job.cancelled:
         return JSONResponse({"ok": True, "ignored": "cancelled"})
+    if kind == "ack":
+        job.ack_at = time.time()
+        return JSONResponse({"ok": True})
     await job.events.put(payload)
     if kind in ("response", "end", "error"):
         job.finished = True

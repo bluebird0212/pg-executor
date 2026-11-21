@@ -770,6 +770,7 @@
   async function handleTask(task) {
     state.currentTask = task;
     renderStatus();
+    await postResult({ id: task.id, kind: "ack" });
     try {
       if (state.replayArmed && state.cache && state.cache.raw) {
         log("使用缓存回放 " + String(task.id).slice(0, 8));
