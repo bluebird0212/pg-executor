@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.4.0
+// @version      1.4.1
 // @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持缓存回放、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
-// @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
-// @downloadURL  https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
+// @updateURL    https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js
+// @downloadURL  https://cdn.jsdelivr.net/gh/bluebird0212/pg-executor@main/pg_executor.user.js
 // @match        https://aistudio.google.com/*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
