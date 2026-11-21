@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         PG Bridge Executor
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.0.0
+// @version      1.1.0
 // @description  在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地 PG Bridge 服务。支持缓存回放。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -232,7 +232,7 @@
       } catch (err) {
         state.connected = false;
         state.connecting = false;
-        state.lastError = String((err && err.message) || err);
+        state.lastError = "本地服务不可用：" + String((err && err.message) || err);
         await sleep(delay);
         delay = Math.min(5000, delay + 700);
       }
@@ -834,6 +834,7 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
 .head{display:flex;align-items:center;gap:8px;padding:9px 8px 9px 13px;background:var(--card);border-bottom:1px solid var(--line)}
 .title{font-weight:650;font-size:13px}
 .ver{color:var(--muted);font-size:10.5px}
+.counts{color:var(--muted);font-size:10.5px;white-space:nowrap;margin-left:2px}
 .dot{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--muted)}
 .dot.ok{background:var(--ok);box-shadow:0 0 0 3px rgba(61,220,151,.18)}
 .dot.warn{background:var(--warn);box-shadow:0 0 0 3px rgba(242,184,75,.18)}
@@ -853,15 +854,18 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
 .hint{color:var(--muted);font-size:11px}
 .log{display:none;white-space:pre-wrap;word-break:break-word;max-height:150px;overflow:auto;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:7px 8px;font:10.5px/1.5 ui-monospace,Consolas,monospace;color:#9aa4b5}
 .log.show{display:block}
+.errline{display:none;color:var(--err);font-size:11px;line-height:1.4;word-break:break-word}
+.errline.show{display:block}
 .cache{display:none}
 .cache.show{display:block}
 `;
 
-  function ensurePanel() {
-    if (state.panel || !document.body) return;
+  function buildPanel() {
     const host = document.createElement("div");
     host.id = "pg-bridge-panel";
-    host.style.cssText = "position:fixed;right:10px;bottom:10px;z-index:2147483647;";
+    host.setAttribute("data-pg-bridge", "panel");
+    host.style.cssText =
+      "position:fixed;right:10px;bottom:10px;z-index:2147483647;pointer-events:auto;";
     const root = host.attachShadow({ mode: "open" });
     const style = document.createElement("style");
     style.textContent = PANEL_CSS;
@@ -872,11 +876,13 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
   <div class="head">
     <span class="title">PG Bridge</span>
     <span class="ver">v${VERSION}</span>
+    <span class="counts" id="counts">✓0 ✗0</span>
     <span class="dot" id="dot"></span>
     <button class="ib" id="collapse" title="折叠">—</button>
   </div>
   <div class="body" id="body">
     <div class="line"><span>本地服务</span><span class="strong" id="conn">未连接</span><span id="waa"></span></div>
+    <div class="errline" id="lastError"></div>
     <div class="line">
       <input class="input" id="server" spellcheck="false">
       <button class="btn" id="save">保存</button>
@@ -892,18 +898,25 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     <div class="line">
       <button class="btn" id="keepalive">后台保活</button>
       <button class="btn" id="logbtn">日志</button>
+      <button class="btn" id="copylog">复制日志</button>
+      <button class="btn" id="openconsole">控制台</button>
     </div>
     <div class="log" id="log"></div>
   </div>
 </div>`;
     root.appendChild(style);
     root.appendChild(wrap);
-    document.body.appendChild(host);
+    const rootNode = document.documentElement || document.body;
+    rootNode.appendChild(host);
+    const oldFallback = document.getElementById("pg-bridge-fallback");
+    if (oldFallback) oldFallback.remove();
     state.panel = host;
     state.ui = {
       dot: root.getElementById("dot"),
+      counts: root.getElementById("counts"),
       conn: root.getElementById("conn"),
       waa: root.getElementById("waa"),
+      lastError: root.getElementById("lastError"),
       server: root.getElementById("server"),
       save: root.getElementById("save"),
       reconnect: root.getElementById("reconnect"),
@@ -915,6 +928,8 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
       task: root.getElementById("task"),
       keepalive: root.getElementById("keepalive"),
       logbtn: root.getElementById("logbtn"),
+      copylog: root.getElementById("copylog"),
+      openconsole: root.getElementById("openconsole"),
       log: root.getElementById("log"),
       collapse: root.getElementById("collapse"),
       body: root.getElementById("body"),
@@ -955,6 +970,30 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     });
     ui.keepalive.addEventListener("click", toggleKeepAlive);
     ui.logbtn.addEventListener("click", () => ui.log.classList.toggle("show"));
+    ui.copylog.addEventListener("click", () => {
+      const text = state.logs.join("\n");
+      const done = () => log("日志已复制");
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done).catch(() => {});
+        } else {
+          const ta = document.createElement("textarea");
+          ta.value = text;
+          document.documentElement.appendChild(ta);
+          ta.select();
+          document.execCommand("copy");
+          ta.remove();
+          done();
+        }
+      } catch (err) {
+        log("复制失败: " + (err && err.message));
+      }
+    });
+    ui.openconsole.addEventListener("click", () => {
+      try {
+        window.open(state.server + "/", "_blank");
+      } catch (_) {}
+    });
     ui.collapse.addEventListener("click", () => {
       const hidden = ui.body.style.display === "none";
       ui.body.style.display = hidden ? "" : "none";
@@ -962,6 +1001,34 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
     });
     renderStatus();
     renderLog();
+  }
+
+  function buildFallback(err) {
+    if (document.getElementById("pg-bridge-fallback")) return;
+    const el = document.createElement("div");
+    el.id = "pg-bridge-fallback";
+    el.style.cssText =
+      "position:fixed;right:12px;bottom:12px;z-index:2147483647;max-width:320px;" +
+      "background:#7a1f1f;color:#fff;padding:10px 14px;border-radius:10px;" +
+      "font:13px/1.5 system-ui,-apple-system,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,.4)";
+    el.textContent = "PG Bridge 已加载，但面板渲染失败：" + String((err && err.message) || err);
+    (document.documentElement || document.body).appendChild(el);
+  }
+
+  function ensurePanel() {
+    if (!document.documentElement && !document.body) return;
+    if (state.panel && state.panel.isConnected) return;
+    if (state.panel && state.panel.shadowRoot) {
+      try {
+        (document.documentElement || document.body).appendChild(state.panel);
+        return;
+      } catch (_) {}
+    }
+    try {
+      buildPanel();
+    } catch (err) {
+      buildFallback(err);
+    }
   }
 
   function renderStatus() {
@@ -983,10 +1050,18 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
           (state.replayArmed ? " · 待回放" : "")
         : "无";
     ui.stats.textContent = "成功 " + state.stats.success + " / 失败 " + state.stats.fail;
+    if (ui.counts) {
+      ui.counts.textContent = "✓" + state.stats.success + " ✗" + state.stats.fail;
+    }
+    if (ui.lastError) {
+      ui.lastError.textContent = state.lastError ? "⚠ " + state.lastError : "";
+      ui.lastError.className = "errline" + (state.lastError ? " show" : "");
+    }
     ui.task.textContent = state.currentTask ? "执行中 " + String(state.currentTask.id).slice(0, 8) : "";
     ui.replay.disabled = !(state.cache && state.cache.raw);
     ui.keepalive.textContent = state.keepAlive ? "保活已开" : "后台保活";
     if (state.lastError && !state.connected) ui.conn.title = state.lastError;
+    ui.dot.title = state.lastError || (state.connected ? "已连接本地服务" : "未连接本地服务");
   }
 
   function renderLog() {
@@ -1000,17 +1075,26 @@ font:12px/1.45 system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei
   // 启动
   // ------------------------------------------------------------------
 
+  log("脚本已加载 v" + VERSION + "，目标页面 " + location.host);
   startHookScanner();
   pollLoop();
   setInterval(renderStatus, 1000);
+  // AI Studio 是 SPA，切换页面时可能重建 DOM：定时把面板重新挂回去
+  setInterval(() => {
+    try {
+      ensurePanel();
+    } catch (_) {}
+  }, 2500);
 
   function boot() {
-    ensurePanel();
-    if (state.keepAlive) {
-      try {
+    try {
+      ensurePanel();
+      if (state.keepAlive) {
         startAudio();
         log("后台保活已恢复");
-      } catch (_) {}
+      }
+    } catch (err) {
+      buildFallback(err);
     }
   }
 
