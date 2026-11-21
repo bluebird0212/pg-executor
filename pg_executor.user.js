@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Bluebird PG
 // @namespace    https://github.com/bluebird0212/pg-executor
-// @version      1.5.3
+// @version      1.5.4
 // @description  Bluebird PG：在 AI Studio 页面里执行 Gemini 请求，把结果回传给本地服务。支持防路由护盾、防截断、多缓存回放、PG 次数与报错查询、请求历史、Token 统计和夜间模式。
 // @author       bluebird0212
 // @updateURL    https://raw.githubusercontent.com/bluebird0212/pg-executor/main/pg_executor.user.js
@@ -174,6 +174,7 @@
     shieldLoaded: false,
     plan: String(pick("pgbridge.plan", "pro")).toLowerCase(),
     usage: { day: "", counts: {} },
+    lastDiag: "",
     stats: { success: 0, fail: 0 },
     tokens: { prompt: 0, completion: 0, total: 0, last: null },
     history: [],
@@ -426,6 +427,7 @@
             models: [],
             caches: cacheSummary(),
             stats: state.stats,
+            diag: state.lastDiag || "",
           },
           40000
         );
@@ -926,8 +928,53 @@
     return headers;
   }
 
+  function findProofDeep(value, depth, seen) {
+    if (depth > 3 || !value) return null;
+    if (typeof value === "string") {
+      const s = value.trim();
+      return s.indexOf("!") === 0 ? s : null;
+    }
+    if (typeof value !== "object") return null;
+    if (seen.indexOf(value) >= 0) return null;
+    seen.push(value);
+    try {
+      if (value instanceof String) {
+        const s = String(value).trim();
+        return s.indexOf("!") === 0 ? s : null;
+      }
+      if (value instanceof ArrayBuffer) {
+        const s = new TextDecoder().decode(value).trim();
+        return s.indexOf("!") === 0 ? s : null;
+      }
+      if (ArrayBuffer.isView(value)) {
+        const s = new TextDecoder().decode(value).trim();
+        return s.indexOf("!") === 0 ? s : null;
+      }
+    } catch (_) {}
+    let keys = [];
+    try {
+      keys = Object.keys(value).slice(0, 50);
+    } catch (_) {
+      return null;
+    }
+    for (const key of keys) {
+      let child;
+      try {
+        child = value[key];
+      } catch (_) {
+        continue;
+      }
+      const hit = findProofDeep(child, depth + 1, seen);
+      if (hit) return hit;
+    }
+    return null;
+  }
+
   function extractProof(value) {
-    if (typeof value === "string") return value;
+    if (typeof value === "string") {
+      const s = value.trim();
+      return s.indexOf("!") === 0 ? s : null;
+    }
     if (!value) return null;
     if (Array.isArray(value)) {
       for (const item of value) {
@@ -937,14 +984,7 @@
       return null;
     }
     if (typeof value === "object") {
-      for (const key of ["proof", "token", "value", "result", "data", "content"]) {
-        const hit = extractProof(value[key]);
-        if (hit) return hit;
-      }
-      try {
-        if (value instanceof ArrayBuffer) return new TextDecoder().decode(value);
-        if (ArrayBuffer.isView(value)) return new TextDecoder().decode(value);
-      } catch (_) {}
+      return findProofDeep(value, 0, []);
     }
     return null;
   }
@@ -956,6 +996,15 @@
       if (!v) break;
       if (typeof v.then === "function") {
         v = await v;
+        continue;
+      }
+      // Blob / Response 形态
+      if (
+        typeof v === "object" &&
+        typeof v.text === "function" &&
+        (typeof v.size === "number" || typeof v.status === "number")
+      ) {
+        v = await v.text();
         continue;
       }
       // 页面里的 snapshot 可能是 generator / async generator
@@ -992,38 +1041,85 @@
     return typeof value + " " + String(value).slice(0, 60);
   }
 
+  function snapshotCandidates() {
+    const makerSuite = W.default_MakerSuite;
+    if (!makerSuite) return [];
+    let keys = [];
+    try {
+      keys = Object.keys(makerSuite);
+    } catch (_) {
+      return [];
+    }
+    const out = [];
+    for (const key of keys) {
+      let fn;
+      try {
+        fn = makerSuite[key];
+      } catch (_) {
+        continue;
+      }
+      if (typeof fn !== "function") continue;
+      let src = "";
+      try {
+        src = Function.prototype.toString.call(fn);
+      } catch (_) {
+        continue;
+      }
+      if (src.indexOf(".snapshot({") < 0 || src.indexOf("content") < 0) continue;
+      out.push({ key, hasYield: src.indexOf("yield") >= 0 });
+    }
+    out.sort((a, b) => (b.hasYield ? 1 : 0) - (a.hasYield ? 1 : 0));
+    return out.map((item) => item.key);
+  }
+
   async function takeProof(digest) {
     const makerSuite = W.default_MakerSuite;
     if (!makerSuite) throw new Error("页面模块未就绪（default_MakerSuite 不存在）");
+    installSnapshotHook();
+    const service = W.__pgBridgeService;
+    if (!service) throw new Error("签名环境未就绪，请先完成引导");
     const timeout = (ms) =>
       new Promise((_, reject) => setTimeout(() => reject(new Error("proof 超时")), ms));
-    let lastErr = null;
-    for (let round = 0; round < 3; round++) {
-      installSnapshotHook();
-      const service = W.__pgBridgeService;
-      const key = state.snapshotKey;
-      if (!service || !key || typeof makerSuite[key] !== "function") {
-        throw new Error("签名环境未就绪，请先完成引导");
-      }
+
+    const candidates = [];
+    if (state.snapshotKey) candidates.push(state.snapshotKey);
+    for (const key of snapshotCandidates()) {
+      if (candidates.indexOf(key) < 0) candidates.push(key);
+    }
+    if (!candidates.length) throw new Error("签名环境未就绪，请先完成引导");
+
+    const tried = [];
+    for (const key of candidates.slice(0, 6)) {
+      if (typeof makerSuite[key] !== "function") continue;
       try {
         const raw = await Promise.race([
           Promise.resolve(makerSuite[key](service, digest)),
-          timeout(round === 0 ? 8000 : 12000),
+          timeout(7000),
         ]);
         const settled = await settleProofValue(raw);
         const proof = extractProof(settled);
-        if (typeof proof === "string" && proof.trim().indexOf("!") === 0) {
-          return proof.trim();
+        if (proof) {
+          if (key !== state.snapshotKey) {
+            state.snapshotKey = key;
+            log("已切换到可用的签名函数: " + key);
+          }
+          return proof;
         }
-        lastErr = new Error(
-          "proof 格式异常（返回 " + describeProofValue(settled) + "）"
-        );
+        // 有些页面版本返回的 proof 不再以 "!" 开头，先按原样尝试
+        if (typeof settled === "string" && settled.trim().length >= 16) {
+          const rawProof = settled.trim();
+          state.lastDiag = "proof 无!前缀，原样使用: " + rawProof.slice(0, 80);
+          log("proof 未以 ! 开头，已按原样使用");
+          return rawProof;
+        }
+        tried.push(key + "→" + describeProofValue(settled));
       } catch (err) {
-        lastErr = err;
+        tried.push(key + "→" + ((err && err.message) || "error"));
       }
-      await sleep(300);
     }
-    throw new Error("生成 proof 失败: " + (lastErr && lastErr.message));
+    state.lastDiag =
+      "candidates=" + tried.join(" | ") + "; service=" + typeof service;
+    throw new Error("生成 proof 失败: " + (tried.join(" | ") || "没有可用的 snapshot 函数"));
   }
 
   async function ensureReady() {
